@@ -16,11 +16,21 @@ export class AnthropicTransport implements Transport {
     const formatted = this.formatAnthropicMessages(messages);
     const toolSchemas = this.formatAnthropicTools(tools);
 
+    // Apply cache_control breakpoints: system prompt + last 3 non-system messages
+    const systemWithCache = {
+      type: "text" as const,
+      text: systemPrompt,
+      cache_control: { type: "ephemeral" as const },
+    };
+
+    const messagesWithCache = this.applyCacheMarkers(formatted);
+
     const resp = await this.client.messages.create({
       model: this.config.model,
-      system: systemPrompt,
-      messages: formatted,
+      system: [systemWithCache],
+      messages: messagesWithCache,
       max_tokens: this.config.maxTokens ?? 4096,
+      ...this.getReasoningParams(),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
@@ -36,11 +46,20 @@ export class AnthropicTransport implements Transport {
     const formatted = this.formatAnthropicMessages(messages);
     const toolSchemas = this.formatAnthropicTools(tools);
 
+    const systemWithCache = {
+      type: "text" as const,
+      text: systemPrompt,
+      cache_control: { type: "ephemeral" as const },
+    };
+
+    const messagesWithCache = this.applyCacheMarkers(formatted);
+
     const stream = this.client.messages.stream({
       model: this.config.model,
-      system: systemPrompt,
-      messages: formatted,
+      system: [systemWithCache],
+      messages: messagesWithCache,
       max_tokens: this.config.maxTokens ?? 4096,
+      ...this.getReasoningParams(),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
@@ -135,6 +154,40 @@ export class AnthropicTransport implements Transport {
     return result;
   }
 
+  /** Apply cache_control markers to the last 3 messages for prompt caching */
+  private applyCacheMarkers(
+    messages: Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }>,
+  ): Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }> {
+    if (messages.length === 0) return messages;
+
+    const result = messages.map((m, i) => {
+      const isLast3 = i >= messages.length - 3;
+      if (!isLast3) return m;
+
+      // Only add cache_control to messages that have array content blocks
+      if (typeof m.content === "string") {
+        return {
+          role: m.role,
+          content: [
+            { type: "text", text: m.content, cache_control: { type: "ephemeral" as const } },
+          ],
+        };
+      }
+
+      // Array content: add cache_control to the last block
+      const blocks = [...(m.content as Array<Record<string, unknown>>)];
+      if (blocks.length > 0) {
+        blocks[blocks.length - 1] = {
+          ...blocks[blocks.length - 1],
+          cache_control: { type: "ephemeral" as const },
+        };
+      }
+      return { role: m.role, content: blocks };
+    });
+
+    return result;
+  }
+
   private parseResponse(
     content: Anthropic.ContentBlock[],
     usage: Anthropic.Usage,
@@ -163,6 +216,16 @@ export class AnthropicTransport implements Transport {
         totalTokens: usage.input_tokens + usage.output_tokens,
       },
       finishReason: stopReason ?? "end_turn",
+    };
+  }
+
+  private getReasoningParams(): Record<string, unknown> {
+    const effort = this.config.reasoningEffort;
+    if (!effort) return {};
+    const budgetMap: Record<string, number> = { low: 2000, medium: 10000, high: 32000 };
+    const budget = budgetMap[effort] ?? 10000;
+    return {
+      thinking: { type: "enabled", budget_tokens: budget },
     };
   }
 }

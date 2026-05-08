@@ -1,5 +1,6 @@
 import type { ToolDef } from "../types.js";
 import type { CronStore, CronJob, ScheduleFormat } from "./store.js";
+import { scanCronPrompt } from "../tools/security.js";
 
 /** cron_manage tool — lets the LLM create and manage scheduled tasks */
 export function cronManageTool(store: CronStore): ToolDef {
@@ -64,6 +65,18 @@ export function cronManageTool(store: CronStore): ToolDef {
           type: "string",
           description: "Webhook URL if delivery includes 'webhook'.",
         },
+        no_agent: {
+          type: "boolean",
+          description: "If true, run command directly without LLM (script-only mode). Requires 'command'.",
+        },
+        silent: {
+          type: "boolean",
+          description: "If true, suppress delivery notifications (silent execution).",
+        },
+        command: {
+          type: "string",
+          description: "Shell command to execute in no_agent mode.",
+        },
       },
       required: ["action"],
     },
@@ -78,7 +91,9 @@ export function cronManageTool(store: CronStore): ToolDef {
             .map((j) => {
               const status = j.enabled ? "enabled" : "disabled";
               const next = j.nextRun ? `next: ${j.nextRun}` : "no upcoming run";
-              return `[${j.id}] ${j.name} (${status}, runs: ${j.runCount}, ${next}) — ${describeSchedule(j.schedule)}`;
+              const mode = j.noAgent ? "script" : "agent";
+              const silent = j.silent ? " [SILENT]" : "";
+              return `[${j.id}] ${j.name} (${status}, ${mode}${silent}, runs: ${j.runCount}, ${next}) — ${describeSchedule(j.schedule)}`;
             })
             .join("\n");
         }
@@ -91,8 +106,21 @@ export function cronManageTool(store: CronStore): ToolDef {
           const prompt = String(args.prompt ?? "");
           if (!prompt) return "Error: prompt is required";
 
+          // Scan for injection patterns in prompt
+          const scan = scanCronPrompt(prompt);
+          if (!scan.safe) {
+            return `BLOCKED: Cron prompt contains suspicious patterns: ${scan.warnings.join(", ")}. Refine the prompt to remove these patterns.`;
+          }
+
           const delivery = (args.delivery as string[]) ?? ["cli"];
           const webhookUrl = args.webhook_url ? String(args.webhook_url) : undefined;
+          const noAgent = Boolean(args.no_agent);
+          const silent = Boolean(args.silent);
+          const command = args.command ? String(args.command) : undefined;
+
+          if (noAgent && !command) {
+            return "Error: 'command' is required when no_agent is true";
+          }
 
           const job = store.add({
             name,
@@ -101,6 +129,9 @@ export function cronManageTool(store: CronStore): ToolDef {
             enabled: true,
             delivery: delivery as ("cli" | "telegram" | "webhook")[],
             webhookUrl,
+            noAgent,
+            silent,
+            command,
           });
 
           return `Task '${name}' created (id=${job.id}, ${describeSchedule(schedule)}). Next run: ${job.nextRun ?? "N/A"}`;
@@ -112,9 +143,17 @@ export function cronManageTool(store: CronStore): ToolDef {
           const schedule = args.schedule_type ? buildSchedule(args) : undefined;
           const patch: Record<string, unknown> = {};
           if (args.name) patch.name = String(args.name);
-          if (args.prompt) patch.prompt = String(args.prompt);
-          if (args.delivery) patch.delivery = args.delivery;
+          if (args.prompt) {
+            const scan = scanCronPrompt(String(args.prompt));
+            if (!scan.safe) {
+              return `BLOCKED: Cron prompt contains suspicious patterns: ${scan.warnings.join(", ")}. Refine the prompt to remove these patterns.`;
+            }
+            patch.prompt = String(args.prompt);
+          }
           if (args.webhook_url) patch.webhookUrl = String(args.webhook_url);
+          if (args.no_agent !== undefined) patch.noAgent = Boolean(args.no_agent);
+          if (args.silent !== undefined) patch.silent = Boolean(args.silent);
+          if (args.command) patch.command = String(args.command);
           if (schedule) patch.schedule = schedule;
 
           const updated = store.update(id, patch);

@@ -84,6 +84,12 @@ export class SessionDB {
     this.db = new Database(resolved);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = OFF");
+    // Migrations for older DB files — run before SCHEMA (which has CREATE TABLE IF NOT EXISTS)
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT"); } catch { /* column already exists */ }
+    try { this.db.exec("ALTER TABLE sessions ADD COLUMN title TEXT"); } catch { /* column already exists */ }
+    try { this.db.exec("ALTER TABLE messages ADD COLUMN tool_name TEXT"); } catch { /* column already exists */ }
+    try { this.db.exec("ALTER TABLE messages ADD COLUMN tool_calls_json TEXT"); } catch { /* column already exists */ }
+    try { this.db.exec("ALTER TABLE messages ADD COLUMN tool_call_id TEXT"); } catch { /* column already exists */ }
     this.db.exec(SCHEMA);
   }
 
@@ -204,7 +210,7 @@ export class SessionDB {
     if (excerpts.length === 0) return "";
 
     const lines = excerpts.map(
-      (e) => `[${e.role}, ${e.createdAt.slice(0, 10)}] ${truncate(e.content, 200)}`,
+      (e) => `[${e.role}, ${(e.createdAt ?? "").slice(0, 10)}] ${truncate(e.content ?? "", 200)}`,
     );
 
     let total = 0;

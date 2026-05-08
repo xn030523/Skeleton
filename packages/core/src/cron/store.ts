@@ -23,6 +23,9 @@ export interface CronJob {
   runCount: number;
   createdAt: string;
   context?: string;              // optional context to chain between runs
+  noAgent?: boolean;             // if true, execute command directly without LLM
+  silent?: boolean;              // if true, suppress delivery notifications
+  command?: string;              // shell command for noAgent mode
 }
 
 interface JobStore {
@@ -63,7 +66,7 @@ export class CronStore {
       : [...this.store.jobs];
   }
 
-  update(id: string, patch: Partial<Pick<CronJob, "name" | "schedule" | "prompt" | "enabled" | "delivery" | "webhookUrl" | "context">>): CronJob | null {
+  update(id: string, patch: Partial<Pick<CronJob, "name" | "schedule" | "prompt" | "enabled" | "delivery" | "webhookUrl" | "context" | "noAgent" | "silent" | "command">>): CronJob | null {
     const idx = this.store.jobs.findIndex((j) => j.id === id);
     if (idx === -1) return null;
     Object.assign(this.store.jobs[idx], patch);

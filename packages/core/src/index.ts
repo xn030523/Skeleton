@@ -14,6 +14,8 @@ export { memoryTools } from "./memory/index.js";
 export { WorkingMemory } from "./memory/index.js";
 export type { WorkingTask, WorkingStep } from "./memory/index.js";
 export { workingMemoryTools } from "./memory/index.js";
+export { HonchoUserModel, honchoTools } from "./memory/index.js";
+export type { Hypothesis, HonchoProfile } from "./memory/index.js";
 export { ProjectContext } from "./context/index.js";
 export { Logger } from "./logger/index.js";
 export type { LogLevel } from "./logger/index.js";
@@ -23,8 +25,25 @@ export { loadEnv } from "./env.js";
 export type { AgentConfig, LLMConfig, Protocol, ToolDef } from "./types.js";
 export { SkillRegistry, registerCtfSkills, skillManageTool } from "./skills/index.js";
 export type { SkillDef, SkillConfig } from "./skills/index.js";
-export { buildMcpServersConfig, listBuiltinMcpServers, jshookServer } from "./mcp/index.js";
-export type { BuiltinMcpServer } from "./mcp/index.js";
+export {
+  buildMcpServersConfig,
+  listBuiltinMcpServers,
+  listBuiltinMcpServersByCategory,
+  generateMcpHelpText,
+  SkeletonMcpHost,
+} from "./mcp/index.js";
+export type { BuiltinMcpServer, McpCategory } from "./mcp/index.js";
+export { MCP_CATEGORIES } from "./mcp/index.js";
+export { PersonalityStore } from "./personality/index.js";
+export {
+  renderMarkdown,
+  markdownToMDv2,
+  escapeMDv2,
+  filterThinkBlocks,
+  isInsideThinkBlock,
+  chunkForTelegram,
+  convertTablesToMDv2,
+} from "./render/index.js";
 export { CronStore, CronScheduler, cronManageTool } from "./cron/index.js";
 export type { CronJob, ScheduleFormat, DeliveryTarget, JobExecutor } from "./cron/index.js";
 export { spawnSubAgent, spawnParallelSubAgents, delegateTaskTool } from "./sub-agent/index.js";

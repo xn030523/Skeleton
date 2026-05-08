@@ -26,7 +26,25 @@ const SAFE_TOOLS = new Set([
   "add_working_note",
   "skill_manage",  // list action is safe
   "cron_manage",   // list action is safe
+  "mcp_manage",    // list/builtin/probe actions are safe
   "consolidate_memories",
+  "web_search",
+  "web_fetch",
+  "toolset_manage",
+]);
+
+/** Low-risk read-only terminal commands — auto-approve without confirmation */
+const LOW_RISK_COMMANDS = new Set([
+  "ls", "dir", "cat", "head", "tail", "less", "more",
+  "pwd", "echo", "printenv", "env", "which", "whereis", "whoami",
+  "uname", "hostname", "date", "uptime", "df", "du", "free",
+  "wc", "file", "stat", "diff", "grep", "egrep", "fgrep",
+  "find", "locate", "ps", "top", "htop", "iotop",
+  "id", "groups", "w", "who", "last",
+  "git status", "git log", "git diff", "git branch", "git remote", "git tag",
+  "npm list", "npm view", "npm info",
+  "pnpm list",
+  "python --version", "python3 --version", "node --version",
 ]);
 
 /** Hardline: patterns that are unconditionally blocked */
@@ -68,12 +86,19 @@ export class ApprovalSystem {
   ): Promise<ApprovalResult> {
     // Safe tools skip approval
     if (SAFE_TOOLS.has(toolName)) {
-      // But check for dangerous action in skill_manage/cron_manage
+      // But check for dangerous action in skill_manage/cron_manage/mcp_manage
       if (toolName === "skill_manage" && String(args.action) === "list") {
         return { approved: true };
       }
       if (toolName === "cron_manage" && String(args.action) === "list") {
         return { approved: true };
+      }
+      if (toolName === "mcp_manage") {
+        const action = String(args.action);
+        if (["list", "builtin", "probe"].includes(action)) {
+          return { approved: true };
+        }
+        return this.requestApproval(toolName, args, `MCP ${action}: ${args.name ?? "unknown"}`);
       }
     }
 
@@ -95,6 +120,18 @@ export class ApprovalSystem {
           return this.requestApproval(toolName, args, rule.reason);
         }
       }
+    }
+
+    // State-modifying tools require approval, except low-risk read-only terminal commands
+    if (toolName === "terminal") {
+      const cmd = this.extractCommandString(toolName, args);
+      if (cmd && this.isLowRiskCommand(cmd)) {
+        return { approved: true };
+      }
+      return this.requestApproval(toolName, args, `${toolName} execution`);
+    }
+    if (toolName === "browser") {
+      return this.requestApproval(toolName, args, `${toolName} execution`);
     }
 
     // Tools that modify state always require approval for destructive actions
@@ -171,5 +208,25 @@ export class ApprovalSystem {
       // Collapse whitespace
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  /** Check if a command is low-risk (read-only) and can be auto-approved */
+  private isLowRiskCommand(cmd: string): boolean {
+    const normalized = this.normalizeCommand(cmd);
+    const firstWord = normalized.split(/\s+/)[0].toLowerCase();
+    const firstTwoWords = normalized.split(/\s+/).slice(0, 2).join(" ").toLowerCase();
+
+    // Check exact command match (e.g., "ls", "pwd")
+    if (LOW_RISK_COMMANDS.has(firstWord)) return true;
+    // Check two-word match (e.g., "git status", "npm list")
+    if (LOW_RISK_COMMANDS.has(firstTwoWords)) return true;
+
+    // No pipes, redirects, or command chaining for auto-approval
+    const dangerChars = /[|;&]|\$\(|>/;
+    if (dangerChars.test(normalized)) return false;
+
+    // Allow ls/cat/etc with flags/arguments (but not with pipes)
+    const SAFE_COMMANDS_WITH_ARGS = ["ls", "cat", "head", "tail", "find", "grep", "wc", "diff", "du", "df", "stat", "file"];
+    return SAFE_COMMANDS_WITH_ARGS.includes(firstWord);
   }
 }

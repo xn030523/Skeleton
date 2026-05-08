@@ -21,6 +21,7 @@ export class ChatCompletionsTransport implements Transport {
       messages: formatted,
       max_tokens: this.config.maxTokens ?? 4096,
       temperature: this.config.temperature ?? 0.3,
+      ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
@@ -56,6 +57,7 @@ export class ChatCompletionsTransport implements Transport {
       max_tokens: this.config.maxTokens ?? 4096,
       temperature: this.config.temperature ?? 0.3,
       stream: true,
+      ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 

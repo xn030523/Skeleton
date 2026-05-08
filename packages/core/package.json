@@ -17,10 +17,18 @@
     "@anthropic-ai/sdk": "^0.52.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^11.9.0",
+    "chalk": "^5.4.0",
     "elf-tools": "^1.1.2",
     "openai": "^4.100.0",
     "pe-library": "^2.0.1",
+    "turndown": "^7.2.0",
     "yaml": "^2.7.0"
+  },
+  "peerDependencies": {
+    "duck-duck-scrape": ">=2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "duck-duck-scrape": { "optional": true }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

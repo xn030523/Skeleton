@@ -3,6 +3,9 @@ import {
   Agent, loadConfig, loadTools, loadEnv, Logger,
   MemoryStore, SessionDB, UserProfile, ProjectContext,
   CronStore, CronScheduler, HonchoUserModel,
+  listBuiltinMcpServersByCategory, MCP_CATEGORIES,
+  markdownToMDv2, escapeMDv2, filterThinkBlocks,
+  chunkForTelegram, convertTablesToMDv2,
 } from "@skeleton/core";
 
 loadEnv();
@@ -27,6 +30,7 @@ type GroupMode = "off" | "mention" | "all";
 const ALLOWED_USERS = parseAllowedUsers(process.env.SKELETON_TG_ALLOWED_USERS ?? "*");
 const GROUP_MODE: GroupMode = (process.env.SKELETON_TG_GROUP_MODE as GroupMode) ?? "mention";
 const REACTIONS = (process.env.SKELETON_TG_REACTIONS ?? "true").toLowerCase() !== "false";
+const REPLY_MODE: "off" | "first" | "all" = (process.env.SKELETON_TG_REPLY_MODE as "off" | "first" | "all") ?? "first";
 
 function parseAllowedUsers(raw: string): Set<number> | null {
   if (raw === "*" || raw === "") return null;
@@ -52,11 +56,13 @@ const honcho = new HonchoUserModel();
 
 let loadedTools: import("@skeleton/core").ToolDef[] = [];
 let mcpClients: unknown[] = [];
+let mcpServerToolMap: Record<string, { toolNames: string[]; client: unknown }> = {};
 
 async function initTools() {
   const result = await loadTools(config as any, memory, userProfile, cronStore);
   loadedTools = result.tools;
   mcpClients = result.mcpClients;
+  mcpServerToolMap = result.mcpServerToolMap;
   console.log(`   Tools: ${loadedTools.length} (${loadedTools.map(t => t.name).join(", ")})`);
   log.info("Tools loaded", { count: loadedTools.length });
 }
@@ -68,23 +74,44 @@ initTools().catch(err => {
 
 // Cron scheduler
 const cronScheduler = new CronScheduler(cronStore, async (job) => {
+  // noAgent mode: execute command directly without LLM
+  if (job.noAgent && job.command) {
+    const { execSync } = await import("node:child_process");
+    try {
+      const output = execSync(job.command, { timeout: 30_000, encoding: "utf-8" });
+      return output.slice(0, 2000);
+    } catch (err) {
+      return `Command failed: ${(err as Error).message}`;
+    }
+  }
+
   const agent = new Agent(
     { ...config, tools: loadedTools },
     memory, userProfile, cronStore, sessionDb, projectContext, honcho,
   );
-  agent.setMcpClients(mcpClients);
+  agent.setMcpClients(mcpClients, mcpServerToolMap);
   const result = await agent.run(job.prompt);
   await agent.close();
 
-  // Deliver to Telegram if configured
-  if (job.delivery.includes("telegram")) {
-    // Find user for delivery (use first known user or last active)
+  // Deliver to Telegram if configured and not silent
+  if (!job.silent && job.delivery.includes("telegram")) {
     for (const [userId, state] of users) {
       try {
         await bot.api.sendMessage(userId, `⏰ [${job.name}] ${result.slice(0, 4000)}`);
       } catch { /* ignore */ }
       break;
     }
+  }
+
+  // Webhook delivery
+  if (!job.silent && job.delivery.includes("webhook") && job.webhookUrl) {
+    try {
+      await fetch(job.webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job: job.name, result: result.slice(0, 4000), timestamp: new Date().toISOString() }),
+      });
+    } catch { /* ignore webhook failures */ }
   }
 
   return result;
@@ -105,7 +132,8 @@ console.log(`🔓 Skeleton TG gateway`);
 console.log(`   Protocol: ${config.llm.protocol} | Model: ${config.llm.model} | Base: ${config.llm.baseUrl}`);
 console.log(`   Allowed users: ${ALLOWED_USERS === null ? "*" : [...ALLOWED_USERS].join(", ")}`);
 console.log(`   Group mode: ${GROUP_MODE} (off / mention / all)`);
-log.info("TG gateway started", { protocol: config.llm.protocol, model: config.llm.model, groupMode: GROUP_MODE });
+console.log(`   MCP servers: ${loadedTools.length} tools, ${mcpClients.length} clients`);
+log.info("TG gateway started", { protocol: config.llm.protocol, model: config.llm.model, groupMode: GROUP_MODE, mcpClients: mcpClients.length });
 
 // ─── Access control middleware ───
 
@@ -167,10 +195,14 @@ function getState(userId: number): UserState {
 
 // ─── MarkdownV2 helpers ───
 
-const MD_ESCAPE_RE = /([_*\[\]()~`>#\+=|{}.!\\-])/g;
+function formatResponseMDv2(text: string): string {
+  const filtered = filterThinkBlocks(text);
+  const noTables = convertTablesToMDv2(filtered);
+  return markdownToMDv2(noTables);
+}
 
 function escapeMD(text: string): string {
-  return text.replace(MD_ESCAPE_RE, "\\$1");
+  return escapeMDv2(text);
 }
 
 function truncateMD(text: string, limit: number): string {
@@ -190,13 +222,17 @@ async function streamToChat(
   chatId: number,
   userId: number,
   text: string,
+  replyToMsgId?: number,
 ): Promise<string> {
   const state = getState(userId);
   let accumulated = "";
   let streamDone = false;
   let streamResult = "";
 
-  const onToken = (token: string) => { accumulated += token; };
+  const onToken = (token: string) => {
+    const filtered = filterThinkBlocks(token);
+    if (filtered) accumulated += filtered;
+  };
 
   const streamPromise = state.agent.runStream(text, onToken).then(r => {
     streamResult = r;
@@ -261,32 +297,69 @@ async function streamToChat(
 
   const result = await streamPromise;
 
+  // Apply MarkdownV2 formatting with think-block filtering and table conversion
+  const formatted = formatResponseMDv2(result);
+
   if (editSupported && msgId) {
-    const finalText = truncateMD(result, MAX_MSG_LEN);
-    try {
-      await bot.api.editMessageText(chatId, msgId, formatResponse(finalText), { parse_mode: "MarkdownV2" });
-    } catch {
-      try { await bot.api.editMessageText(chatId, msgId, finalText); } catch { /* ignore */ }
+    // Multi-chunk delivery: first chunk edits the streaming message, rest are new messages
+    const chunks = chunkForTelegram(formatted, MAX_MSG_LEN);
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      try {
+        if (ci === 0) {
+          await bot.api.editMessageText(chatId, msgId, chunk, { parse_mode: "MarkdownV2" });
+        } else {
+          const replyOpts = REPLY_MODE === "all" && replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
+          await bot.api.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2", ...replyOpts });
+        }
+      } catch {
+        // MarkdownV2 parse failed — fallback to plain text
+        try {
+          const plainChunk = chunk.replace(/\\([_*\[\]()~`>#\+=|{}.!\\-])/g, "$1");
+          if (ci === 0) {
+            await bot.api.editMessageText(chatId, msgId, plainChunk);
+          } else {
+            await bot.api.sendMessage(chatId, plainChunk);
+          }
+        } catch { /* ignore */ }
+      }
     }
   } else if (fallbackPrefix) {
     const continuation = result.slice(fallbackPrefix.length);
     if (continuation.trim()) {
       try {
-        const finalText = truncateMD(continuation, MAX_MSG_LEN);
-        await bot.api.sendMessage(chatId, finalText);
+        const contFormatted = formatResponseMDv2(continuation);
+        const chunks = chunkForTelegram(contFormatted, MAX_MSG_LEN);
+        for (const chunk of chunks) {
+          try {
+            await bot.api.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2" });
+          } catch {
+            const plain = chunk.replace(/\\([_*\[\]()~`>#\+=|{}.!\\-])/g, "$1");
+            await bot.api.sendMessage(chatId, plain);
+          }
+        }
       } catch { /* ignore */ }
     }
     try { await bot.api.editMessageText(chatId, msgId!, fallbackPrefix); } catch { /* ignore */ }
   } else if (msgId) {
-    const finalText = truncateMD(result, MAX_MSG_LEN);
-    try { await bot.api.sendMessage(chatId, finalText); } catch { /* ignore */ }
+    const chunks = chunkForTelegram(formatted, MAX_MSG_LEN);
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      try {
+        const replyOpts = ci === 0 && REPLY_MODE !== "off" && replyToMsgId ? { reply_parameters: { message_id: replyToMsgId } } : {};
+        await bot.api.sendMessage(chatId, chunk, { parse_mode: "MarkdownV2", ...replyOpts });
+      } catch {
+        const plain = chunk.replace(/\\([_*\[\]()~`>#\+=|{}.!\\-])/g, "$1");
+        await bot.api.sendMessage(chatId, plain);
+      }
+    }
   }
 
   return result;
 }
 
 function formatResponse(text: string): string {
-  return escapeMD(text);
+  return formatResponseMDv2(text);
 }
 
 // ─── Concurrency ───
@@ -331,6 +404,7 @@ bot.command("start", async (ctx) => {
       "/forget \\[keyword\\] — Delete memories\n" +
       "/search \\[query\\] — Search past conversations\n" +
       "/tools — List tools\n" +
+      "/mcp — List MCP servers\n" +
       "/cron — List scheduled tasks",
     { parse_mode: "MarkdownV2" },
   );
@@ -441,6 +515,22 @@ bot.command("tools", async (ctx) => {
   await ctx.reply(`Tools \\(${toolList.length}\\):\n\n${preview}`, { parse_mode: "MarkdownV2" });
 });
 
+bot.command("mcp", async (ctx) => {
+  const byCategory = listBuiltinMcpServersByCategory();
+  const lines: string[] = [];
+  for (const [category, servers] of Object.entries(byCategory)) {
+    lines.push(`\\[${escapeMD(category)}\\]`);
+    for (const s of servers.slice(0, 5)) {
+      const plat = s.platform ? ` \\(${s.platform.join("\\/")}\\)` : "";
+      const reqs = s.requiredEnv?.length ? ` \\[needs: ${s.requiredEnv.join(", ")}\\]` : "";
+      lines.push(`  ${escapeMD(s.name)}${plat} — ${escapeMD(s.envEnable)}\\=true${reqs}`);
+    }
+    if (servers.length > 5) lines.push(`  \\+${servers.length - 5} more`);
+  }
+  lines.push("\\nEnable: skeleton\\.yaml or SKELETON\\_MCP\\_<NAME>\\=true");
+  await ctx.reply(lines.join("\n"), { parse_mode: "MarkdownV2" });
+});
+
 bot.command("cron", async (ctx) => {
   const jobs = cronStore.list();
   if (jobs.length === 0) {
@@ -456,9 +546,87 @@ bot.command("cron", async (ctx) => {
   await ctx.reply(`⏰ Cron tasks:\n\n${preview}`, { parse_mode: "MarkdownV2" });
 });
 
+bot.command("compress", async (ctx) => {
+  const agent = getState(ctx.from!.id).agent;
+  try {
+    const msg = await agent.compress();
+    await ctx.reply(`🗜 ${escapeMD(msg)}`, { parse_mode: "MarkdownV2" });
+  } catch (err) {
+    await ctx.reply(`❌ Compression failed: ${escapeMD((err as Error).message)}`, { parse_mode: "MarkdownV2" });
+  }
+});
+
+bot.command("undo", async (ctx) => {
+  const agent = getState(ctx.from!.id).agent;
+  const ok = agent.undoLastTurn();
+  await ctx.reply(ok ? "↩ Last turn undone\\." : "Nothing to undo\\.", { parse_mode: "MarkdownV2" });
+});
+
+bot.command("retry", async (ctx) => {
+  const userId = ctx.from!.id;
+  const agent = getState(userId).agent;
+  const lastInput = agent.getLastUserInput();
+  if (!lastInput) {
+    await ctx.reply("No previous input to retry\\.", { parse_mode: "MarkdownV2" });
+    return;
+  }
+  agent.undoLastTurn();
+  const chatId = ctx.chat.id;
+  withLock(userId, async () => {
+    const typingStop = { done: false };
+    const typingTimer = keepTyping(chatId, typingStop);
+    try {
+      const result = await streamToChat(chatId, userId, lastInput, REPLY_MODE !== "off" ? ctx.message?.message_id : undefined);
+      log.info("Retry completed", { userId, inputLen: lastInput.length, outputLen: result.length });
+    } catch (err) {
+      log.error("Retry failed", { userId, error: (err as Error).message });
+      await ctx.reply(`❌ ${(err as Error).message}`).catch(() => {});
+    } finally {
+      typingStop.done = true;
+      clearInterval(typingTimer);
+    }
+  });
+});
+
+bot.command("usage", async (ctx) => {
+  const agent = getState(ctx.from!.id).agent;
+  const usage = agent.getUsage();
+  const lines = [
+    `📊 *Usage Stats*`,
+    `Last turn: ${usage.last.promptTokens} prompt / ${usage.last.completionTokens} completion tokens`,
+    `Session: ${usage.total.promptTokens} prompt / ${usage.total.completionTokens} completion / ${usage.total.turns} turns`,
+  ];
+  await ctx.reply(lines.join("\n"), { parse_mode: "MarkdownV2" });
+});
+
+bot.command("personality", async (ctx) => {
+  const agent = getState(ctx.from!.id).agent;
+  const ps = agent.getPersonality();
+  const parts = (ctx.message?.text ?? "").split(/\s+/);
+
+  if (parts.length === 1 || (parts.length === 2 && parts[1] === "personality")) {
+    const names = ps.list();
+    const active = ps.getActiveName();
+    if (names.length === 0) {
+      await ctx.reply("No personalities configured\\. Create one: /personality set default", { parse_mode: "MarkdownV2" });
+      return;
+    }
+    const preview = names.map((n) => n === active ? `● ${escapeMD(n)}` : `○ ${escapeMD(n)}`).join("\n");
+    await ctx.reply(`🎭 Personalities:\n\n${preview}`, { parse_mode: "MarkdownV2" });
+  } else if (parts[1] === "set" && parts[2]) {
+    const ok = ps.setActive(parts[2]);
+    await ctx.reply(ok ? `🎭 Personality set to: ${escapeMD(parts[2])}` : `Not found\\. Use /personality to list\\.`, { parse_mode: "MarkdownV2" });
+  } else if (parts[1] === "show" && parts[2]) {
+    const content = ps.get(parts[2]);
+    await ctx.reply(content ? escapeMD(content.slice(0, 3000)) : `Not found\\.`, { parse_mode: "MarkdownV2" });
+  } else {
+    await ctx.reply("Usage: /personality \\[set <name>] \\[show <name>\\]", { parse_mode: "MarkdownV2" });
+  }
+});
+
 // ─── Message handler ───
 
-const KNOWN_COMMANDS = new Set(["start", "new", "reset", "history", "model", "memory", "remember", "forget", "search", "tools", "cron"]);
+const KNOWN_COMMANDS = new Set(["start", "new", "reset", "history", "model", "memory", "remember", "forget", "search", "tools", "mcp", "cron", "compress", "undo", "retry", "usage", "personality"]);
 
 bot.on("message:text", async (ctx) => {
   const userId = ctx.from!.id;
@@ -480,7 +648,7 @@ bot.on("message:text", async (ctx) => {
     await setReaction(chatId, msgId, "👀");
 
     try {
-      const result = await streamToChat(chatId, userId, text);
+      const result = await streamToChat(chatId, userId, text, REPLY_MODE !== "off" ? msgId : undefined);
       await setReaction(chatId, msgId, "👍");
       log.info("Chat turn completed", { userId, inputLen: text.length, outputLen: result.length });
     } catch (err) {
@@ -499,6 +667,11 @@ bot.on("message:text", async (ctx) => {
 const BOT_COMMANDS = [
   { command: "new", description: "New session (memories kept)" },
   { command: "reset", description: "Reset conversation" },
+  { command: "compress", description: "Compress conversation context" },
+  { command: "undo", description: "Undo last turn" },
+  { command: "retry", description: "Retry last input" },
+  { command: "usage", description: "Show token usage stats" },
+  { command: "personality", description: "Show/set personality" },
   { command: "history", description: "View message history" },
   { command: "model", description: "Show current model info" },
   { command: "memory", description: "View saved memories" },
@@ -506,6 +679,7 @@ const BOT_COMMANDS = [
   { command: "forget", description: "Delete memories by keyword" },
   { command: "search", description: "Search past conversations" },
   { command: "tools", description: "List registered tools" },
+  { command: "mcp", description: "List MCP servers & how to enable" },
   { command: "cron", description: "List scheduled tasks" },
 ];
 

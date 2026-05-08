@@ -2,12 +2,15 @@ import {
   Agent, loadConfig, loadTools, loadEnv, Logger,
   MemoryStore, SessionDB, UserProfile, ProjectContext,
   CronStore, CronScheduler, ApprovalSystem,
-  HonchoUserModel,
+  HonchoUserModel, generateMcpHelpText, listBuiltinMcpServersByCategory, MCP_CATEGORIES,
+  renderMarkdown, filterThinkBlocks,
 } from "@skeleton/core";
 import chalk from "chalk";
 import * as readline from "node:readline";
+import { runSetup } from "./setup.js";
+import { runDoctor } from "./doctor.js";
 import {
-  renderHeader, renderDivider, renderInputPrompt,
+  renderHeader, renderDivider,
   startSpinner, stopSpinner, CLEAR,
 } from "./theme.js";
 
@@ -23,6 +26,8 @@ async function main() {
 Usage:
   skeleton            Start interactive REPL
   skeleton "query"    One-shot query (streaming)
+  skeleton setup      Interactive configuration wizard
+  skeleton doctor     Run diagnostic checks
 
 Commands:
   /new                New session (memories kept)
@@ -35,7 +40,13 @@ Commands:
   /search <query>     Search past conversations
   /model              Show model info
   /tools              List registered tools
+  /mcp                List built-in MCP servers & how to enable
   /cron               List cron tasks
+  /compress           Compress conversation context
+  /undo               Undo last turn
+  /retry              Retry last input
+  /usage              Show token usage stats
+  /personality        Show/set personality (SOUL.md)
   /profile            Show user profile
 
 Environment:
@@ -44,6 +55,16 @@ Environment:
   SKELETON_BASE_URL   Base URL (before /v1)
   SKELETON_MODEL      Model name
 `);
+    return;
+  }
+
+  if (args[0] === "setup") {
+    await runSetup();
+    return;
+  }
+
+  if (args[0] === "doctor") {
+    await runDoctor();
     return;
   }
 
@@ -63,11 +84,22 @@ Environment:
   const honcho = new HonchoUserModel();
 
   // Load tools (includes memory tools, skill tools, cron tools, etc.)
-  const { tools, mcpClients, memory: mem, userProfile: profile, cronStore: cron } =
+  const { tools, mcpClients, mcpServerToolMap, memory: mem, userProfile: profile, cronStore: cron } =
     await loadTools(config as any, memory, userProfile, cronStore);
 
   // Cron scheduler: execute jobs by spawning a fresh Agent per tick
   const cronScheduler = new CronScheduler(cronStore, async (job) => {
+    // noAgent mode: execute command directly without LLM
+    if (job.noAgent && job.command) {
+      const { execSync } = await import("node:child_process");
+      try {
+        const output = execSync(job.command, { timeout: 30_000, encoding: "utf-8" });
+        return output.slice(0, 2000);
+      } catch (err) {
+        return `Command failed: ${(err as Error).message}`;
+      }
+    }
+
     const agent = new Agent(
       { ...config, tools },
       mem,
@@ -79,6 +111,18 @@ Environment:
     );
     const result = await agent.run(job.prompt);
     await agent.close();
+
+    // Webhook delivery
+    if (!job.silent && job.delivery.includes("webhook") && job.webhookUrl) {
+      try {
+        await fetch(job.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job: job.name, result: result.slice(0, 4000), timestamp: new Date().toISOString() }),
+        });
+      } catch { /* ignore webhook failures */ }
+    }
+
     return result;
   });
 
@@ -89,9 +133,9 @@ Environment:
   const oneshot = args.find((a) => !a.startsWith("-"));
   if (oneshot) {
     const agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
-    agent.setMcpClients(mcpClients);
+    agent.setMcpClients(mcpClients, mcpServerToolMap);
     log.info("One-shot query", { input: oneshot.slice(0, 80) });
-    await agent.runStream(oneshot, (token) => process.stdout.write(token));
+    await agent.runStream(oneshot, (token) => process.stdout.write(String(token ?? "")));
     console.log();
     await agent.close();
     cronScheduler.stop();
@@ -105,7 +149,16 @@ Environment:
 
   // Interactive mode
   let agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
-  agent.setMcpClients(mcpClients);
+  agent.setMcpClients(mcpClients, mcpServerToolMap);
+
+  // Tool progress display
+  agent.onToolCall = (name, args) => {
+    const argPreview = (JSON.stringify(args) ?? "").slice(0, 60);
+    process.stdout.write(`\n${chalk.gray("  ┊ ")}${chalk.cyan(name)} ${chalk.gray(argPreview)}\n`);
+  };
+  agent.onToolResult = (name, preview) => {
+    process.stdout.write(`${chalk.gray("  ┊ ")}${chalk.green("✓")} ${chalk.gray((preview ?? "").slice(0, 80))}\n`);
+  };
 
   // Setup approval callback for CLI
   agent.getApprovalSystem().onApprovalRequest(async (toolName, args, reason) => {
@@ -126,6 +179,8 @@ Environment:
 
   // Print header
   console.log(renderHeader(config.llm.model, process.cwd()));
+  console.log(renderDivider());
+  console.log(chalk.gray(`  Tools: ${tools.length} | MCP clients: ${mcpClients.length}`));
   console.log(renderDivider());
   const width = Math.min(process.stdout.columns || 80, 100);
 
@@ -179,7 +234,14 @@ Environment:
     if (trimmed === "/new") {
       cronScheduler.stop();
       agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
-      agent.setMcpClients(mcpClients);
+      agent.setMcpClients(mcpClients, mcpServerToolMap);
+      agent.onToolCall = (name, args) => {
+        const argPreview = (JSON.stringify(args) ?? "").slice(0, 60);
+        process.stdout.write(`\n${chalk.gray("  ┊ ")}${chalk.cyan(name)} ${chalk.gray(argPreview)}\n`);
+      };
+      agent.onToolResult = (name, preview) => {
+        process.stdout.write(`${chalk.gray("  ┊ ")}${chalk.green("✓")} ${chalk.gray((preview ?? "").slice(0, 80))}\n`);
+      };
       cronScheduler.start();
       console.log(chalk.green("✓ New session."));
       console.log(renderDivider());
@@ -200,8 +262,15 @@ Environment:
         console.log(chalk.gray("  (empty)"));
       } else {
         for (const msg of history) {
-          const icon = msg.role === "user" ? chalk.green("❯") : chalk.magenta("◆");
-          console.log(`  ${icon} ${msg.content.slice(0, 200)}`);
+          const roleConfig: Record<string, { glyph: string; style: typeof chalk.green }> = {
+            user: { glyph: "❯", style: chalk.green },
+            assistant: { glyph: "◆", style: chalk.magenta },
+            tool: { glyph: "┊", style: chalk.gray },
+          };
+          const rc = roleConfig[msg.role] ?? { glyph: "·", style: chalk.gray };
+          const icon = rc.style(rc.glyph);
+          const limit = msg.role === "tool" ? 100 : 200;
+          console.log(`  ${icon} ${(msg.content ?? "").slice(0, limit)}`);
         }
       }
       drawBox();
@@ -269,6 +338,23 @@ Environment:
       return;
     }
 
+    if (trimmed === "/mcp") {
+      const byCategory = listBuiltinMcpServersByCategory();
+      for (const [category, servers] of Object.entries(byCategory)) {
+        console.log(chalk.cyan(`  ${category}:`));
+        for (const s of servers) {
+          const plat = s.platform ? chalk.gray(` (${s.platform.join("/")})`) : "";
+          const reqs = s.requiredEnv?.length
+            ? chalk.yellow(` [needs: ${s.requiredEnv.join(", ")}]`)
+            : "";
+          console.log(`    ${chalk.green(s.name)}${plat} — enable: ${chalk.gray(s.envEnable)}=true${reqs}`);
+        }
+      }
+      console.log(chalk.gray("  Enable via: skeleton.yaml mcp.servers.<name> or SKELETON_MCP_<NAME>=true"));
+      drawBox();
+      return;
+    }
+
     if (trimmed === "/cron") {
       const jobs = cronStore.list();
       if (jobs.length === 0) {
@@ -296,6 +382,124 @@ Environment:
       return;
     }
 
+    if (trimmed === "/compress") {
+      try {
+        const msg = await agent.compress();
+        console.log(chalk.green(`  ✓ ${msg}`));
+      } catch (err) {
+        console.log(chalk.red(`  ✗ Compression failed: ${(err as Error).message}`));
+      }
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/undo") {
+      const ok = agent.undoLastTurn();
+      if (ok) {
+        console.log(chalk.green("  ✓ Last turn undone."));
+      } else {
+        console.log(chalk.gray("  Nothing to undo."));
+      }
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/retry") {
+      const lastInput = agent.getLastUserInput();
+      if (!lastInput) {
+        console.log(chalk.gray("  No previous input to retry."));
+        drawBox();
+        return;
+      }
+      agent.undoLastTurn();
+      // Re-process as normal input (no slash)
+      closeBox(lastInput);
+      let firstToken = true;
+      let spinnerLine = false;
+      startSpinner((frame) => {
+        if (firstToken) {
+          process.stdout.write(`  ${chalk.cyan(frame)} ${chalk.gray("Thinking...")}\r`);
+          spinnerLine = true;
+        }
+      });
+      try {
+        const result = await agent.runStream(lastInput, (token) => {
+          if (firstToken) {
+            stopSpinner();
+            process.stdout.write(`${CLEAR}\r`);
+            firstToken = false;
+            spinnerLine = false;
+            console.log(chalk.magenta("◆") + chalk.gray(" Skeleton"));
+          }
+          process.stdout.write(String(token ?? ""));
+        });
+        if (spinnerLine) {
+          stopSpinner();
+          process.stdout.write(`${CLEAR}\r`);
+          console.log(chalk.magenta("◆") + chalk.gray(" Skeleton"));
+          process.stdout.write(result ?? "");
+        }
+        console.log();
+        console.log(renderDivider());
+      } catch (err) {
+        stopSpinner();
+        if (spinnerLine) process.stdout.write(`${CLEAR}\r`);
+        console.log(chalk.red(`  ✗ ${(err as Error).message}`));
+        if ((err as Error).stack) {
+          console.log(chalk.gray((err as Error).stack!.split("\n").slice(1, 4).join("\n")));
+        }
+      }
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/usage") {
+      const usage = agent.getUsage();
+      console.log(chalk.cyan("  Last turn:"));
+      console.log(`    Prompt: ${usage.last.promptTokens} tokens | Completion: ${usage.last.completionTokens} tokens`);
+      console.log(chalk.cyan("  Session total:"));
+      console.log(`    Prompt: ${usage.total.promptTokens} tokens | Completion: ${usage.total.completionTokens} tokens | Turns: ${usage.total.turns}`);
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/personality" || trimmed.startsWith("/personality ")) {
+      const ps = agent.getPersonality();
+      const parts = trimmed.split(/\s+/);
+      if (parts.length === 1) {
+        // List personalities
+        const names = ps.list();
+        const active = ps.getActiveName();
+        if (names.length === 0) {
+          console.log(chalk.gray("  No personalities configured."));
+          console.log(chalk.gray("  Create one: /personality set default"));
+        } else {
+          for (const name of names) {
+            const marker = name === active ? chalk.green(" ●") : chalk.gray(" ○");
+            console.log(`  ${marker} ${name}`);
+          }
+        }
+      } else if (parts[1] === "set" && parts[2]) {
+        const ok = ps.setActive(parts[2]);
+        if (ok) {
+          console.log(chalk.green(`  ✓ Personality set to: ${parts[2]}`));
+        } else {
+          console.log(chalk.yellow(`  Personality '${parts[2]}' not found. Use /personality to list.`));
+        }
+      } else if (parts[1] === "show" && parts[2]) {
+        const content = ps.get(parts[2]);
+        if (content) {
+          console.log(chalk.gray(content));
+        } else {
+          console.log(chalk.yellow(`  Personality '${parts[2]}' not found.`));
+        }
+      } else {
+        console.log(chalk.gray("  Usage: /personality [set <name>] [show <name>]"));
+      }
+      drawBox();
+      return;
+    }
+
     if (trimmed.startsWith("/")) {
       console.log(chalk.yellow(`  Unknown: ${trimmed}`));
       drawBox();
@@ -305,6 +509,7 @@ Environment:
     // ─── Normal chat with streaming ───
     let firstToken = true;
     let spinnerLine = false;
+    let accumulated = "";
 
     startSpinner((frame) => {
       if (firstToken) {
@@ -315,6 +520,10 @@ Environment:
 
     try {
       const result = await agent.runStream(trimmed, (token) => {
+        const safeToken = String(token ?? "");
+        const filtered = filterThinkBlocks(safeToken);
+        if (!filtered) return;
+
         if (firstToken) {
           stopSpinner();
           process.stdout.write(`${CLEAR}\r`);
@@ -322,24 +531,31 @@ Environment:
           spinnerLine = false;
           console.log(chalk.magenta("◆") + chalk.gray(" Skeleton"));
         }
-        process.stdout.write(token);
+        accumulated += filtered;
+        process.stdout.write(filtered);
       });
 
       if (spinnerLine) {
         stopSpinner();
         process.stdout.write(`${CLEAR}\r`);
         console.log(chalk.magenta("◆") + chalk.gray(" Skeleton"));
-        process.stdout.write(result);
+        // Non-streaming fallback: render markdown for the full result
+        const filtered = filterThinkBlocks(result ?? "");
+        process.stdout.write(renderMarkdown(filtered));
+        accumulated = filtered;
       }
 
       console.log();
       console.log(renderDivider());
-      log.info("Chat turn completed", { inputLen: trimmed.length, outputLen: result.length });
+      log.info("Chat turn completed", { inputLen: trimmed.length, outputLen: accumulated.length });
     } catch (err) {
       stopSpinner();
       if (spinnerLine) process.stdout.write(`${CLEAR}\r`);
-      log.error("Chat failed", { error: (err as Error).message });
+      log.error("Chat failed", { error: (err as Error).message, stack: (err as Error).stack });
       console.log(chalk.red(`  ✗ ${(err as Error).message}`));
+      if ((err as Error).stack) {
+        console.log(chalk.gray((err as Error).stack!.split("\n").slice(1, 4).join("\n")));
+      }
     }
 
     drawBox();

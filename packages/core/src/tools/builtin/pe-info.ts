@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import type { ToolDef } from "../../types.js";
-import { NtExecutable, Data } from "pe-library";
+import { NtExecutable } from "pe-library";
 
 const MACHINE_MAP: Record<number, string> = {
   0x14c: "x86 (i386)", 0x8664: "x86-64 (AMD64)", 0xaa64: "ARM64",
@@ -38,68 +38,46 @@ export function peInfoTool(): ToolDef {
       properties: {
         path: { type: "string", description: "Absolute path to the PE file" },
         sections: { type: "boolean", default: true, description: "Include section table" },
-        imports: { type: "boolean", default: true, description: "Include import table" },
-        exports: { type: "boolean", default: true, description: "Include export table" },
       },
       required: ["path"],
     },
     execute: async (args) => {
-      const { path, sections = true, imports = true, exports = true } = args as {
-        path: string; sections?: boolean; imports?: boolean; exports?: boolean;
+      const { path, sections = true } = args as {
+        path: string; sections?: boolean;
       };
       try {
         const buf = fs.readFileSync(path);
         const pe = NtExecutable.from(buf);
 
-        const fh = pe.getFileHeader();
-        const oh = pe.getOptionalHeader();
+        const fh = pe.newHeader.fileHeader;
+        const oh = pe.newHeader.optionalHeader;
 
         const result: Record<string, unknown> = {
           format: "PE",
-          machine: MACHINE_MAP[fh.Machine] ?? `0x${fh.Machine.toString(16)}`,
-          numberOfSections: fh.NumberOfSections,
-          timestamp: new Date(fh.TimeDateStamp * 1000).toISOString(),
-          characteristics: decodeFlags(fh.Characteristics, {
+          bitness: pe.is32bit() ? 32 : 64,
+          machine: MACHINE_MAP[fh.machine] ?? `0x${fh.machine.toString(16)}`,
+          numberOfSections: fh.numberOfSections,
+          timestamp: new Date(fh.timeDateStamp * 1000).toISOString(),
+          characteristics: decodeFlags(fh.characteristics, {
             0x2: "EXECUTABLE_IMAGE", 0x4: "LINE_NUMS_STRIPPED",
             0x8: "LOCAL_SYMS_STRIPPED", 0x20: "LARGE_ADDRESS_AWARE",
             0x100: "32BIT_MACHINE", 0x2000: "DLL",
           }),
-          imageBase: `0x${oh.ImageBase.toString(16)}`,
-          entryPoint: `0x${oh.AddressOfEntryPoint.toString(16)}`,
-          subsystem: SUBSYSTEM_MAP[oh.Subsystem] ?? oh.Subsystem,
-          dllCharacteristics: decodeFlags(oh.DllCharacteristics, DLL_CHARS),
-          imageSize: oh.SizeOfImage,
+          imageBase: `0x${oh.imageBase.toString(16)}`,
+          entryPoint: `0x${oh.addressOfEntryPoint.toString(16)}`,
+          subsystem: SUBSYSTEM_MAP[oh.subsystem] ?? oh.subsystem,
+          dllCharacteristics: decodeFlags(oh.dllCharacteristics, DLL_CHARS),
+          imageSize: oh.sizeOfImage,
         };
 
         if (sections) {
           result.sections = pe.getAllSections().map((s) => ({
-            name: s.name,
-            virtualAddress: `0x${s.virtualAddress.toString(16)}`,
-            virtualSize: s.virtualSize,
-            rawSize: s.rawSize,
-            flags: decodeFlags(s.flags, SECTION_FLAGS),
+            name: s.info.name,
+            virtualAddress: `0x${s.info.virtualAddress.toString(16)}`,
+            virtualSize: s.info.virtualSize,
+            rawSize: s.info.sizeOfRawData,
+            flags: decodeFlags(s.info.characteristics, SECTION_FLAGS),
           }));
-        }
-
-        if (imports) {
-          const importDir = pe.getImportEntries();
-          if (importDir && importDir.length > 0) {
-            result.imports = importDir.map((entry) => ({
-              dll: entry.name,
-              functions: entry.functions?.map((f) => f.name ?? `ord#${f.ordinal}`) ?? [],
-            }));
-          }
-        }
-
-        if (exports) {
-          const exportDir = pe.getExportEntries();
-          if (exportDir && exportDir.length > 0) {
-            result.exports = exportDir.map((e) => ({
-              name: e.name,
-              ordinal: e.ordinal,
-              address: `0x${e.address.toString(16)}`,
-            }));
-          }
         }
 
         return result;

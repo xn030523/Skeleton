@@ -40,7 +40,7 @@ export function identifyTool(): ToolDef {
       const { path } = args as { path: string };
       try {
         const stat = fs.statSync(path);
-        const buf = fs.readFileSync(path, { length: 64 });
+        const buf = fs.readFileSync(path).subarray(0, 64);
 
         // ELF detail extraction
         if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { AgentConfig, LLMConfig, Protocol, ToolDef } from "../types.js";
+import type { AgentConfig, LLMConfig, Protocol, ReasoningEffort, ToolDef } from "../types.js";
 import { builtInTools } from "../tools/index.js";
 import type { SkillConfig } from "../skills/index.js";
 import { buildMcpServersConfig } from "../mcp/index.js";
@@ -40,9 +40,10 @@ export async function loadTools(
   memory?: MemoryStore,
   userProfile?: UserProfile,
   cronStore?: CronStore,
-): Promise<{ tools: ToolDef[]; mcpClients: unknown[]; memory: MemoryStore; userProfile: UserProfile; cronStore: CronStore }> {
+): Promise<{ tools: ToolDef[]; mcpClients: unknown[]; mcpServerToolMap: Record<string, { toolNames: string[]; client: unknown }>; memory: MemoryStore; userProfile: UserProfile; cronStore: CronStore }> {
   const tools: ToolDef[] = [];
   const mcpClients: unknown[] = [];
+  const mcpServerToolMap: Record<string, { toolNames: string[]; client: unknown }> = {};
 
   // Ensure memory store and user profile exist
   const mem = memory ?? new MemoryStore();
@@ -72,14 +73,31 @@ export async function loadTools(
     try {
       const { connectAllMcpServers } = await import("../tools/mcp.js");
       const result = await connectAllMcpServers(servers);
+      // Apply mcp_{server}_ prefix to tool names (Hermes collision-prevention pattern)
+      for (const [srvName, srvEntry] of Object.entries(result.serverToolMap)) {
+        const prefixedNames: string[] = [];
+        for (const origName of srvEntry.toolNames) {
+          const prefixed = `mcp_${srvName}_${origName}`;
+          const tool = result.tools.find(t => t.name === origName);
+          if (tool) {
+            (tool as { name: string }).name = prefixed;
+            if (!tool.description.includes(srvName)) {
+              (tool as { description: string }).description = `[${srvName}] ${tool.description}`;
+            }
+          }
+          prefixedNames.push(prefixed);
+        }
+        srvEntry.toolNames = prefixedNames;
+      }
       tools.push(...result.tools);
       mcpClients.push(...result.clients);
+      Object.assign(mcpServerToolMap, result.serverToolMap);
     } catch (err) {
       console.error(`MCP connection failed: ${(err as Error).message}`);
     }
   }
 
-  return { tools, mcpClients, memory: mem, userProfile: profile, cronStore: cron };
+  return { tools, mcpClients, mcpServerToolMap, memory: mem, userProfile: profile, cronStore: cron };
 }
 
 function resolveLLM(partial: Partial<LLMConfig> = {}): LLMConfig {
@@ -88,6 +106,8 @@ function resolveLLM(partial: Partial<LLMConfig> = {}): LLMConfig {
   const baseUrl = partial.baseUrl ?? env("SKELETON_BASE_URL") ?? defaultBaseUrl(protocol);
   const model = partial.model ?? env("SKELETON_MODEL") ?? defaultModel(protocol);
 
+  const reasoningEffort = partial.reasoningEffort ?? (env("SKELETON_REASONING_EFFORT") as ReasoningEffort | undefined) ?? undefined;
+
   return {
     protocol,
     apiKey,
@@ -95,6 +115,7 @@ function resolveLLM(partial: Partial<LLMConfig> = {}): LLMConfig {
     model,
     maxTokens: partial.maxTokens ?? 4096,
     temperature: partial.temperature ?? 0.3,
+    reasoningEffort,
   };
 }
 

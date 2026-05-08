@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import type { ToolDef } from "../../types.js";
-import { ELF } from "elf-tools";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const elfTools = require("elf-tools");
+const elfParse = elfTools.parse as (buf: Buffer) => any;
 
 const MACHINE_MAP: Record<string, string> = {
   "0x03": "x86", "0x3e": "x86-64", "0xb7": "AArch64",
@@ -43,7 +46,7 @@ export function elfInfoTool(): ToolDef {
       };
       try {
         const buf = fs.readFileSync(path);
-        const elf = ELF.parse(buf);
+        const elf = elfParse(buf);
 
         if (!elf) return { error: "Failed to parse ELF file — may not be a valid ELF" };
 

@@ -36,7 +36,7 @@ export function sessionSearchTool(sessionDb: SessionDB): ToolDef {
       }
 
       return results
-        .map((r) => `[${r.role}, ${r.createdAt.slice(0, 10)}] ${r.content.slice(0, 300)}`)
+        .map((r) => `[${r.role}, ${(r.createdAt ?? "").slice(0, 10)}] ${(r.content ?? "").slice(0, 300)}`)
         .join("\n\n");
     },
   };
@@ -64,7 +64,7 @@ export function recentSessionsTool(sessionDb: SessionDB): ToolDef {
       if (sessions.length === 0) return "No past sessions found.";
 
       return sessions
-        .map((s) => `[${s.id.slice(0, 8)}] ${s.title ?? "Untitled"} (${s.messageCount} messages, ${s.createdAt.slice(0, 10)})`)
+        .map((s) => `[${(s.id ?? "").slice(0, 8)}] ${s.title ?? "Untitled"} (${s.messageCount} messages, ${(s.createdAt ?? "").slice(0, 10)})`)
         .join("\n");
     },
   };

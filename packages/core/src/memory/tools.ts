@@ -1,6 +1,7 @@
 import type { ToolDef } from "../types.js";
 import type { MemoryStore, MemoryCategory } from "./store.js";
 import type { UserProfile } from "./user-profile.js";
+import { scanMemoryContent } from "../tools/security.js";
 
 export function memoryTools(
   memory: MemoryStore,
@@ -47,6 +48,11 @@ function saveMemoryTool(memory: MemoryStore, userProfile: UserProfile): ToolDef 
       const isUserPref = Boolean(args.is_user_preference);
 
       if (!content.trim()) return "Error: empty content";
+
+      const threatScan = scanMemoryContent(content);
+      if (!threatScan.safe) {
+        return `Error: memory content blocked by security scan — ${threatScan.warnings.join("; ")}`;
+      }
 
       const id = memory.add(content, category, "manual");
       const lines: string[] = [];

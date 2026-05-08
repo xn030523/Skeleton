@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "build": "npx pnpm -r build",
-    "cli": "npx tsx packages/cli/src/bin.ts",
+    "cli": "npx pnpm -r build && node packages/cli/dist/bin.js",
     "tg": "npx pnpm -r build && node packages/tg/dist/bin.js",
     "lint": "npx pnpm -r lint",
     "test": "npx pnpm -r test"

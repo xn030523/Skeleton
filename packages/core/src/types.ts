@@ -1,5 +1,7 @@
 export type Protocol = "openai" | "anthropic";
 
+export type ReasoningEffort = "low" | "medium" | "high";
+
 export interface LLMConfig {
   protocol: Protocol;
   apiKey: string;
@@ -7,6 +9,7 @@ export interface LLMConfig {
   model: string;
   maxTokens?: number;
   temperature?: number;
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface AgentConfig {
@@ -23,6 +26,8 @@ export interface ToolDef {
   description: string;
   parameters: Record<string, unknown>;
   execute: (args: Record<string, unknown>) => Promise<unknown>;
+  toolset?: string;
+  emoji?: string;
 }
 
 export interface NormalizedResponse {

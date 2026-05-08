@@ -10,6 +10,12 @@ import { ctfOsintSkill } from "./ctf-osint.js";
 import { ctfMalwareSkill } from "./ctf-malware.js";
 import { ctfAiMlSkill } from "./ctf-ai-ml.js";
 import { ctfWriteupSkill } from "./ctf-writeup.js";
+import { jsDeobfuscationSkill } from "./ctf-js-deobfuscation.js";
+import { wasmReverseSkill } from "./ctf-wasm-reverse.js";
+import { bundleAnalysisSkill } from "./ctf-bundle-analysis.js";
+import { chromeExtensionAuditSkill } from "./ctf-chrome-extension-audit.js";
+import { apiReverseSkill } from "./ctf-api-reverse.js";
+import { antiBotBypassSkill } from "./ctf-anti-bot-bypass.js";
 
 const CTF_SKILLS: SkillDef[] = [
   solveChallengeSkill,
@@ -23,6 +29,13 @@ const CTF_SKILLS: SkillDef[] = [
   ctfMalwareSkill,
   ctfAiMlSkill,
   ctfWriteupSkill,
+  // Web Reverse Engineering (granular skills per agentskills.io)
+  jsDeobfuscationSkill,
+  wasmReverseSkill,
+  bundleAnalysisSkill,
+  chromeExtensionAuditSkill,
+  apiReverseSkill,
+  antiBotBypassSkill,
 ];
 
 export function registerCtfSkills(registry: SkillRegistry): void {
@@ -31,4 +44,10 @@ export function registerCtfSkills(registry: SkillRegistry): void {
   }
 }
 
-export { solveChallengeSkill, ctfReverseSkill, ctfPwnSkill, ctfCryptoSkill, ctfWebSkill, ctfForensicsSkill, ctfMiscSkill, ctfOsintSkill, ctfMalwareSkill, ctfAiMlSkill, ctfWriteupSkill };
+export {
+  solveChallengeSkill, ctfReverseSkill, ctfPwnSkill, ctfCryptoSkill,
+  ctfWebSkill, ctfForensicsSkill, ctfMiscSkill, ctfOsintSkill,
+  ctfMalwareSkill, ctfAiMlSkill, ctfWriteupSkill,
+  jsDeobfuscationSkill, wasmReverseSkill, bundleAnalysisSkill,
+  chromeExtensionAuditSkill, apiReverseSkill, antiBotBypassSkill,
+};
