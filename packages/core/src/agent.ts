@@ -102,13 +102,15 @@ export class Agent {
   }
 
   private async callWithFallback(systemPrompt: string): Promise<NormalizedResponse> {
+    let lastErr: unknown;
     try {
       return await this.transport.send(systemPrompt, this.messages);
-    } catch {
+    } catch (err) {
+      lastErr = err;
       if (this.fallbackTransport) {
-        try { return await this.fallbackTransport.send(systemPrompt, this.messages); } catch {}
+        try { return await this.fallbackTransport.send(systemPrompt, this.messages); } catch (err2) { lastErr = err2; }
       }
-      throw new Error("All providers failed");
+      throw new Error(`All providers failed: ${(lastErr as Error)?.message ?? lastErr}`);
     }
   }
 
@@ -116,13 +118,15 @@ export class Agent {
     systemPrompt: string,
     onToken: (token: string) => void,
   ): Promise<NormalizedResponse> {
+    let lastErr: unknown;
     try {
       return await this.transport.sendStream(systemPrompt, this.messages, onToken);
-    } catch {
+    } catch (err) {
+      lastErr = err;
       if (this.fallbackTransport) {
-        try { return await this.fallbackTransport.sendStream(systemPrompt, this.messages, onToken); } catch {}
+        try { return await this.fallbackTransport.sendStream(systemPrompt, this.messages, onToken); } catch (err2) { lastErr = err2; }
       }
-      throw new Error("All providers failed");
+      throw new Error(`All providers failed: ${(lastErr as Error)?.message ?? lastErr}`);
     }
   }
 

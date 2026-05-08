@@ -37,6 +37,7 @@ export class SessionDB {
     fs.mkdirSync(path.dirname(resolved), { recursive: true });
     this.db = new Database(resolved);
     this.db.pragma("journal_mode = WAL");
+    this.db.pragma("foreign_keys = OFF");
     this.db.exec(SCHEMA);
   }
 

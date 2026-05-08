@@ -158,6 +158,9 @@ Skeleton's memory is a **closed learning loop** — not a simple chat log, but a
 | `SKELETON_BASE_URL` | Yes | Base URL — everything before `/v1` |
 | `SKELETON_MODEL` | Yes | Model name (e.g. `gpt-4o`, `claude-sonnet-4-5-20250514`, or any custom model) |
 | `SKELETON_TG_TOKEN` | TG only | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `SKELETON_TG_ALLOWED_USERS` | TG only | Who can chat with the bot: `*` = everyone (default), or comma-separated user IDs (e.g. `123456,789012`) for whitelist |
+| `SKELETON_TG_GROUP_MODE` | TG only | Bot behavior in groups: `off` = ignore groups, `mention` = only reply when @mentioned (default), `all` = reply to all messages |
+| `SKELETON_TG_REACTIONS` | TG only | Message reactions (👀 processing / 👍 success / 👎 failure): `true` = enabled (default), `false` = disabled |
 
 ### YAML Config
 

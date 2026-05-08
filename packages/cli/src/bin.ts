@@ -1,4 +1,4 @@
-import { Agent, loadConfig, loadEnv, MemoryStore, SessionDB } from "@skeleton/core";
+import { Agent, loadConfig, loadEnv, Logger, MemoryStore, SessionDB } from "@skeleton/core";
 import chalk from "chalk";
 import * as readline from "node:readline";
 import {
@@ -7,6 +7,7 @@ import {
 } from "./theme.js";
 
 loadEnv();
+const log = new Logger("cli");
 
 async function main() {
   const args = process.argv.slice(2);
@@ -40,21 +41,25 @@ Environment:
 
   const config = loadConfig();
   if (!config.llm.apiKey) {
+    log.error("No API key configured");
     console.log(chalk.yellow("No API key. Set SKELETON_API_KEY"));
     process.exit(1);
   }
 
   const memory = new MemoryStore();
   const db = new SessionDB();
+  log.info("CLI started", { protocol: config.llm.protocol, model: config.llm.model });
 
   // One-shot streaming mode
   const oneshot = args.find((a) => !a.startsWith("-"));
   if (oneshot) {
     const agent = new Agent(config, memory);
+    log.info("One-shot query", { input: oneshot.slice(0, 80) });
     await agent.runStream(oneshot, (token) => process.stdout.write(token));
     console.log();
     memory.close();
     db.close();
+    log.close();
     return;
   }
 
@@ -106,8 +111,10 @@ Environment:
     // ─── Slash commands ───
     if (trimmed === "/quit" || trimmed === "/exit") {
       console.log(chalk.gray("Bye."));
+      log.info("CLI exiting");
       memory.close();
       db.close();
+      log.close();
       rl.close();
       return;
     }
@@ -232,9 +239,11 @@ Environment:
 
       db.saveMessage(sessionId, { role: "user", content: trimmed });
       db.saveMessage(sessionId, { role: "assistant", content: result });
+      log.info("Chat turn completed", { sessionId, inputLen: trimmed.length, outputLen: result.length });
     } catch (err) {
       stopSpinner();
       if (spinnerLine) process.stdout.write(`${CLEAR}\r`);
+      log.error("Chat failed", { error: (err as Error).message });
       console.log(chalk.red(`  ✗ ${(err as Error).message}`));
     }
 
@@ -244,6 +253,7 @@ Environment:
   rl.on("close", () => {
     memory.close();
     db.close();
+    log.close();
   });
 }
 
