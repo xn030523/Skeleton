@@ -33,4 +33,15 @@ export class ToolRegistry {
       },
     }));
   }
+
+  getAnthropicToolSchemas(): Array<{ name: string; description: string; input_schema: { type: "object" } & Record<string, unknown> }> {
+    return [...this.tools.values()].map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: {
+        type: "object" as const,
+        ...t.parameters,
+      },
+    }));
+  }
 }

@@ -1,4 +1,9 @@
-import { Agent, loadConfig, loadEnv, Logger, MemoryStore, SessionDB } from "@skeleton/core";
+import {
+  Agent, loadConfig, loadTools, loadEnv, Logger,
+  MemoryStore, SessionDB, UserProfile, ProjectContext,
+  CronStore, CronScheduler, ApprovalSystem,
+  HonchoUserModel,
+} from "@skeleton/core";
 import chalk from "chalk";
 import * as readline from "node:readline";
 import {
@@ -29,6 +34,9 @@ Commands:
   /forget <keyword>   Delete memories
   /search <query>     Search past conversations
   /model              Show model info
+  /tools              List registered tools
+  /cron               List cron tasks
+  /profile            Show user profile
 
 Environment:
   SKELETON_PROTOCOL   openai | anthropic
@@ -46,27 +54,75 @@ Environment:
     process.exit(1);
   }
 
+  // Initialize all stores
   const memory = new MemoryStore();
-  const db = new SessionDB();
-  log.info("CLI started", { protocol: config.llm.protocol, model: config.llm.model });
+  const userProfile = new UserProfile();
+  const sessionDb = new SessionDB();
+  const cronStore = new CronStore();
+  const projectContext = new ProjectContext();
+  const honcho = new HonchoUserModel();
+
+  // Load tools (includes memory tools, skill tools, cron tools, etc.)
+  const { tools, mcpClients, memory: mem, userProfile: profile, cronStore: cron } =
+    await loadTools(config as any, memory, userProfile, cronStore);
+
+  // Cron scheduler: execute jobs by spawning a fresh Agent per tick
+  const cronScheduler = new CronScheduler(cronStore, async (job) => {
+    const agent = new Agent(
+      { ...config, tools },
+      mem,
+      profile,
+      cron,
+      sessionDb,
+      projectContext,
+      honcho,
+    );
+    const result = await agent.run(job.prompt);
+    await agent.close();
+    return result;
+  });
+
+  const agentConfig = { ...config, tools };
+  log.info("CLI started", { protocol: config.llm.protocol, model: config.llm.model, toolCount: tools.length });
 
   // One-shot streaming mode
   const oneshot = args.find((a) => !a.startsWith("-"));
   if (oneshot) {
-    const agent = new Agent(config, memory);
+    const agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
+    agent.setMcpClients(mcpClients);
     log.info("One-shot query", { input: oneshot.slice(0, 80) });
     await agent.runStream(oneshot, (token) => process.stdout.write(token));
     console.log();
-    memory.close();
-    db.close();
+    await agent.close();
+    cronScheduler.stop();
+    sessionDb.close();
     log.close();
     return;
   }
 
+  // Start cron scheduler
+  cronScheduler.start();
+
   // Interactive mode
-  let agent = new Agent(config, memory);
-  let sessionId = `sess_${Date.now()}`;
-  db.createSession(sessionId);
+  let agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
+  agent.setMcpClients(mcpClients);
+
+  // Setup approval callback for CLI
+  agent.getApprovalSystem().onApprovalRequest(async (toolName, args, reason) => {
+    console.log(chalk.yellow(`\n  ⚠ Approval required: ${toolName} — ${reason}`));
+    const answer = await new Promise<string>((resolve) => {
+      rl.question(chalk.yellow("  Approve? [y/N/s=session/a=always] "), resolve);
+    });
+    if (answer.toLowerCase() === "a") {
+      agent.getApprovalSystem().approvePermanent(`${toolName}:${JSON.stringify(args)}`);
+      return true;
+    }
+    if (answer.toLowerCase() === "s") {
+      agent.getApprovalSystem().approveSession(`${toolName}:${JSON.stringify(args)}`);
+      return true;
+    }
+    return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";
+  });
 
   // Print header
   console.log(renderHeader(config.llm.model, process.cwd()));
@@ -85,9 +141,9 @@ Environment:
     process.stdout.write(top + "\n");
     rl.setPrompt(chalk.gray("│ ") + chalk.cyan("❯ "));
     rl.prompt();
-    process.stdout.write("\x1b7");        // DECSC: save cursor position
-    process.stdout.write("\n" + bot);     // draw bottom border below
-    process.stdout.write("\x1b8");        // DECRC: restore cursor position
+    process.stdout.write("\x1b7");
+    process.stdout.write("\n" + bot);
+    process.stdout.write("\x1b8");
   }
 
   function closeBox(text: string) {
@@ -112,17 +168,19 @@ Environment:
     if (trimmed === "/quit" || trimmed === "/exit") {
       console.log(chalk.gray("Bye."));
       log.info("CLI exiting");
-      memory.close();
-      db.close();
+      cronScheduler.stop();
+      await agent.close();
+      sessionDb.close();
       log.close();
       rl.close();
       return;
     }
 
     if (trimmed === "/new") {
-      agent = new Agent(config, memory);
-      sessionId = `sess_${Date.now()}`;
-      db.createSession(sessionId);
+      cronScheduler.stop();
+      agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
+      agent.setMcpClients(mcpClients);
+      cronScheduler.start();
       console.log(chalk.green("✓ New session."));
       console.log(renderDivider());
       drawBox();
@@ -153,7 +211,6 @@ Environment:
     if (trimmed === "/model") {
       console.log(chalk.gray(`  ${config.llm.protocol} | ${config.llm.model}`));
       console.log(chalk.gray(`  Base: ${config.llm.baseUrl}`));
-      console.log(chalk.gray(`  Session: ${sessionId}`));
       drawBox();
       return;
     }
@@ -161,7 +218,7 @@ Environment:
     if (trimmed === "/memory") {
       const all = memory.list();
       if (all.length === 0) {
-        console.log(chalk.gray("  No memories yet. Just chat — I auto-save key findings."));
+        console.log(chalk.gray("  No memories yet."));
       } else {
         for (const m of all) {
           console.log(`  ${chalk.yellow(`[${m.category}]`)} ${m.content.slice(0, 120)}`);
@@ -186,13 +243,54 @@ Environment:
     }
 
     if (trimmed.startsWith("/search ")) {
-      const results = db.search(trimmed.slice("/search ".length));
+      const results = sessionDb.search(trimmed.slice("/search ".length));
       if (results.length === 0) {
         console.log(chalk.gray("  No results."));
       } else {
         for (const r of results) {
           console.log(`  ${chalk.gray(`[${r.role}]`)} ${r.content.slice(0, 150)}`);
         }
+      }
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/tools") {
+      const registry = agent.getToolRegistry();
+      const toolList = registry.list();
+      if (toolList.length === 0) {
+        console.log(chalk.gray("  No tools registered."));
+      } else {
+        for (const t of toolList) {
+          console.log(`  ${chalk.cyan(t.name)} — ${t.description.slice(0, 80)}`);
+        }
+      }
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/cron") {
+      const jobs = cronStore.list();
+      if (jobs.length === 0) {
+        console.log(chalk.gray("  No scheduled tasks."));
+      } else {
+        for (const j of jobs) {
+          const status = j.enabled ? chalk.green("●") : chalk.gray("○");
+          console.log(`  ${status} ${j.name} (${j.runCount} runs) — ${j.nextRun ?? "no upcoming"}`);
+        }
+      }
+      drawBox();
+      return;
+    }
+
+    if (trimmed === "/profile") {
+      const data = userProfile.getLive();
+      if (data.preferences.length === 0 && data.projects.length === 0) {
+        console.log(chalk.gray("  User profile is empty."));
+      } else {
+        for (const p of data.preferences) console.log(`  ${chalk.cyan("pref:")} ${p}`);
+        for (const p of data.projects) console.log(`  ${chalk.green("proj:")} ${p}`);
+        for (const e of data.environment) console.log(`  ${chalk.yellow("env:")}  ${e}`);
       }
       drawBox();
       return;
@@ -236,10 +334,7 @@ Environment:
 
       console.log();
       console.log(renderDivider());
-
-      db.saveMessage(sessionId, { role: "user", content: trimmed });
-      db.saveMessage(sessionId, { role: "assistant", content: result });
-      log.info("Chat turn completed", { sessionId, inputLen: trimmed.length, outputLen: result.length });
+      log.info("Chat turn completed", { inputLen: trimmed.length, outputLen: result.length });
     } catch (err) {
       stopSpinner();
       if (spinnerLine) process.stdout.write(`${CLEAR}\r`);
@@ -250,9 +345,10 @@ Environment:
     drawBox();
   });
 
-  rl.on("close", () => {
-    memory.close();
-    db.close();
+  rl.on("close", async () => {
+    cronScheduler.stop();
+    await agent.close();
+    sessionDb.close();
     log.close();
   });
 }

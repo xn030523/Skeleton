@@ -1,0 +1,64 @@
+# Skeleton Configuration
+# Copy to your project directory or ~/.skeleton/config.yaml
+
+llm:
+  protocol: openai      # openai | anthropic
+  # apiKey: sk-...      # Or set SKELETON_API_KEY
+  # baseUrl: https://api.openai.com
+  # model: gpt-4o
+  maxTokens: 4096
+  temperature: 0.3
+
+# fallback:              # Optional fallback LLM
+#   protocol: anthropic
+#   apiKey: sk-ant-...
+#   model: claude-sonnet-4-20250514
+
+agent:
+  maxTurns: 20
+  # systemPrompt: "Custom system prompt..."
+
+# ─── Skills ───
+# CTF knowledge base (solve-challenge orchestrator + 11 category workflows)
+# Enabled by default. Set to false to disable.
+skills:
+  ctf: true
+
+# ─── Built-in Tools ───
+# 7 RE tools: identify, hexdump, strings, pe_info, elf_info, entropy, disassemble
+# Enabled by default. Use builtinList to select specific tools.
+# tools:
+#   builtin: true
+#   builtinList:
+#     - identify
+#     - hexdump
+#     - strings
+#     - pe_info
+#     - elf_info
+#     - entropy
+
+# ─── MCP Servers ───
+# Built-in MCP servers are auto-loaded (jshookmcp by default).
+# Override a built-in by defining same name under servers.
+# Disable a built-in via env var (e.g. SKELETON_JSHOOK=false).
+
+# mcp:
+#   servers:
+#     # Override jshook built-in (e.g. change profile):
+#     # jshook:
+#     #   command: npx
+#     #   args: ["-y", "@jshookmcp/jshook@latest"]
+#     #   env:
+#     #     JSHOOK_BASE_PROFILE: workflow
+#
+#     # Add custom MCP servers:
+#     filesystem:
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#     ghidra:
+#       command: python
+#       args: ["mcp-ghidra.py"]
+#       env:
+#         GHIDRA_HOME: "/opt/ghidra"
+#     remote:
+#       url: "http://localhost:8080/mcp"

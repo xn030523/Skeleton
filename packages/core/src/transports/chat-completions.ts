@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { Transport } from "./base.js";
-import type { LLMConfig, Message, NormalizedResponse, ToolCall } from "../types.js";
+import type { LLMConfig, Message, NormalizedResponse, ToolCall, ToolDef } from "../types.js";
 
 export class ChatCompletionsTransport implements Transport {
   private client: OpenAI;
@@ -12,14 +12,16 @@ export class ChatCompletionsTransport implements Transport {
     });
   }
 
-  async send(systemPrompt: string, messages: Message[]): Promise<NormalizedResponse> {
+  async send(systemPrompt: string, messages: Message[], tools?: ToolDef[]): Promise<NormalizedResponse> {
     const formatted = this.formatMessages(systemPrompt, messages);
+    const toolSchemas = this.formatOpenAITools(tools);
 
     const resp = await this.client.chat.completions.create({
       model: this.config.model,
       messages: formatted,
       max_tokens: this.config.maxTokens ?? 4096,
       temperature: this.config.temperature ?? 0.3,
+      ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
     const choice = resp.choices[0];
@@ -43,8 +45,10 @@ export class ChatCompletionsTransport implements Transport {
     systemPrompt: string,
     messages: Message[],
     onToken: (token: string) => void,
+    tools?: ToolDef[],
   ): Promise<NormalizedResponse> {
     const formatted = this.formatMessages(systemPrompt, messages);
+    const toolSchemas = this.formatOpenAITools(tools);
 
     const stream = await this.client.chat.completions.create({
       model: this.config.model,
@@ -52,6 +56,7 @@ export class ChatCompletionsTransport implements Transport {
       max_tokens: this.config.maxTokens ?? 4096,
       temperature: this.config.temperature ?? 0.3,
       stream: true,
+      ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
     let content = "";
@@ -91,15 +96,41 @@ export class ChatCompletionsTransport implements Transport {
     };
   }
 
+  private formatOpenAITools(tools?: ToolDef[]): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+    return tools.map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+  }
+
   private formatMessages(systemPrompt: string, messages: Message[]) {
     return [
       { role: "system" as const, content: systemPrompt },
-      ...messages.map((m) => ({
-        role: m.role as "user" | "assistant" | "tool",
-        content: m.content,
-        ...(m.role === "assistant" && m.toolCalls ? { tool_calls: m.toolCalls } : {}),
-        ...(m.role === "tool" && m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
-      })),
+      ...messages.map((m) => {
+        const base: Record<string, unknown> = {
+          role: m.role as "user" | "assistant" | "tool",
+          content: m.content,
+        };
+        if (m.role === "assistant" && m.toolCalls) {
+          base.tool_calls = m.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.arguments),
+            },
+          }));
+        }
+        if (m.role === "tool" && m.toolCallId) {
+          base.tool_call_id = m.toolCallId;
+        }
+        return base;
+      }),
     ];
   }
 

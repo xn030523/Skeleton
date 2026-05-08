@@ -15,6 +15,7 @@ export interface AgentConfig {
   maxTurns?: number;
   systemPrompt?: string;
   tools?: ToolDef[];
+  skills?: import("./skills/index.js").SkillConfig;
 }
 
 export interface ToolDef {

@@ -1,5 +1,9 @@
 import { Bot } from "grammy";
-import { Agent, loadConfig, loadEnv, Logger, MemoryStore, SessionDB } from "@skeleton/core";
+import {
+  Agent, loadConfig, loadTools, loadEnv, Logger,
+  MemoryStore, SessionDB, UserProfile, ProjectContext,
+  CronStore, CronScheduler, HonchoUserModel,
+} from "@skeleton/core";
 
 loadEnv();
 const log = new Logger("tg");
@@ -25,18 +29,67 @@ const GROUP_MODE: GroupMode = (process.env.SKELETON_TG_GROUP_MODE as GroupMode) 
 const REACTIONS = (process.env.SKELETON_TG_REACTIONS ?? "true").toLowerCase() !== "false";
 
 function parseAllowedUsers(raw: string): Set<number> | null {
-  if (raw === "*" || raw === "") return null; // null = allow all
+  if (raw === "*" || raw === "") return null;
   const ids = raw.split(",").map((s) => Number(s.trim())).filter((n) => !isNaN(n) && n > 0);
   return ids.length > 0 ? new Set(ids) : null;
 }
 
 function isUserAllowed(userId: number): boolean {
-  if (ALLOWED_USERS === null) return true; // wildcard
+  if (ALLOWED_USERS === null) return true;
   return ALLOWED_USERS.has(userId);
 }
 
-const db = new SessionDB();
+// ─── Initialize stores ───
+
+const sessionDb = new SessionDB();
 const memory = new MemoryStore();
+const userProfile = new UserProfile();
+const cronStore = new CronStore();
+const projectContext = new ProjectContext();
+const honcho = new HonchoUserModel();
+
+// ─── Tool loading (async) ───
+
+let loadedTools: import("@skeleton/core").ToolDef[] = [];
+let mcpClients: unknown[] = [];
+
+async function initTools() {
+  const result = await loadTools(config as any, memory, userProfile, cronStore);
+  loadedTools = result.tools;
+  mcpClients = result.mcpClients;
+  console.log(`   Tools: ${loadedTools.length} (${loadedTools.map(t => t.name).join(", ")})`);
+  log.info("Tools loaded", { count: loadedTools.length });
+}
+
+initTools().catch(err => {
+  console.error("Failed to load tools:", err);
+  log.error("Tool loading failed", { error: (err as Error).message });
+});
+
+// Cron scheduler
+const cronScheduler = new CronScheduler(cronStore, async (job) => {
+  const agent = new Agent(
+    { ...config, tools: loadedTools },
+    memory, userProfile, cronStore, sessionDb, projectContext, honcho,
+  );
+  agent.setMcpClients(mcpClients);
+  const result = await agent.run(job.prompt);
+  await agent.close();
+
+  // Deliver to Telegram if configured
+  if (job.delivery.includes("telegram")) {
+    // Find user for delivery (use first known user or last active)
+    for (const [userId, state] of users) {
+      try {
+        await bot.api.sendMessage(userId, `⏰ [${job.name}] ${result.slice(0, 4000)}`);
+      } catch { /* ignore */ }
+      break;
+    }
+  }
+
+  return result;
+});
+cronScheduler.start();
 
 // Per-user state
 interface UserState {
@@ -58,49 +111,39 @@ log.info("TG gateway started", { protocol: config.llm.protocol, model: config.ll
 
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
-  if (!userId) return; // no user info
+  if (!userId) return;
 
-  // DM: check user whitelist
   if (ctx.chat?.type === "private") {
     if (!isUserAllowed(userId)) {
       console.log(`   ⛔ DM rejected: user ${userId}`);
       log.warn("DM rejected", { userId });
-      return; // silently drop
+      return;
     }
     return next();
   }
 
-  // Group chat: check group mode
   if (ctx.chat?.type === "group" || ctx.chat?.type === "supergroup") {
-    if (GROUP_MODE === "off") return; // ignore all group messages
-
-    // Always allow commands (slash commands)
+    if (GROUP_MODE === "off") return;
     if (ctx.message?.text?.startsWith("/")) {
       if (!isUserAllowed(userId)) return;
       return next();
     }
-
     if (GROUP_MODE === "all") {
       if (!isUserAllowed(userId)) return;
       return next();
     }
-
-    // GROUP_MODE === "mention" — only respond when @bot is mentioned
     const botInfo = bot.botInfo;
     const text = ctx.message?.text ?? "";
     const mentionStr = `@${botInfo.username}`;
     const isMentioned = text.includes(mentionStr);
-
     if (isMentioned) {
       if (!isUserAllowed(userId)) return;
-      // Strip @mention from text before sending to agent
       if (ctx.message) {
         ctx.message.text = text.replace(mentionStr, "").trim();
       }
       return next();
     }
-
-    return; // not mentioned, ignore
+    return;
   }
 
   return next();
@@ -109,12 +152,14 @@ bot.use(async (ctx, next) => {
 function getState(userId: number): UserState {
   let state = users.get(userId);
   if (!state) {
+    const agentConfig = { ...config, tools: loadedTools };
     state = {
-      agent: new Agent(config, memory),
+      agent: new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho),
       sessionId: `tg_${userId}_${Date.now()}`,
       lock: Promise.resolve(),
     };
-    db.createSession(state.sessionId, `Telegram ${userId}`);
+    state.agent.setMcpClients(mcpClients);
+    sessionDb.createSession(state.sessionId, `Telegram ${userId}`);
     users.set(userId, state);
   }
   return state;
@@ -133,7 +178,7 @@ function truncateMD(text: string, limit: number): string {
   return text.slice(0, limit - 3) + "…";
 }
 
-// ─── Streaming via editMessage (Hermes-style) ───
+// ─── Streaming via editMessage ───
 
 const STREAM_CURSOR = " ▉";
 const EDIT_INTERVAL_MS = 2500;
@@ -151,10 +196,8 @@ async function streamToChat(
   let streamDone = false;
   let streamResult = "";
 
-  // Token callback — pure synchronous buffer, NO API calls
   const onToken = (token: string) => { accumulated += token; };
 
-  // Start stream in background
   const streamPromise = state.agent.runStream(text, onToken).then(r => {
     streamResult = r;
     streamDone = true;
@@ -167,9 +210,8 @@ async function streamToChat(
   let editSupported = true;
   let floodStrikes = 0;
   let currentInterval = EDIT_INTERVAL_MS;
-  let fallbackPrefix = ""; // last visible text before edit broke
+  let fallbackPrefix = "";
 
-  // Phase 1: wait for first meaningful content, then send initial message
   while (!msgId && !streamDone) {
     if (accumulated.length >= 4) {
       const msg = await bot.api.sendMessage(chatId, accumulated + STREAM_CURSOR);
@@ -181,30 +223,23 @@ async function streamToChat(
     }
   }
 
-  // Stream finished before we could even send a message
   if (!msgId) {
     return await streamPromise;
   }
 
-  // Phase 2: progressive edit loop — polls buffer at controlled interval
   while (!streamDone) {
     await new Promise(r => setTimeout(r, currentInterval));
-
-    if (!editSupported) continue; // in fallback mode — skip edits, wait for stream to finish
-
+    if (!editSupported) continue;
     const newChars = accumulated.length - lastEditLen;
     if (newChars < BUFFER_THRESHOLD) continue;
-
     const displayText = truncateMD(accumulated, MAX_MSG_LEN) + STREAM_CURSOR;
     if (displayText === lastSentText) continue;
-
     lastEditLen = accumulated.length;
-
     try {
       await bot.api.editMessageText(chatId, msgId!, displayText);
       lastSentText = displayText;
       floodStrikes = 0;
-      currentInterval = EDIT_INTERVAL_MS; // reset interval on success
+      currentInterval = EDIT_INTERVAL_MS;
     } catch (err: unknown) {
       const desc = ((err as Error)?.message ?? "").toLowerCase();
       if (desc.includes("not modified")) continue;
@@ -212,14 +247,12 @@ async function streamToChat(
         floodStrikes++;
         currentInterval = Math.min(currentInterval * 2, 10000);
         if (floodStrikes >= MAX_FLOOD_STRIKES) {
-          // Enter fallback mode — stop editing, send fresh message at the end
           editSupported = false;
           fallbackPrefix = lastSentText.replace(STREAM_CURSOR, "");
           log.warn("Flood control: entering fallback mode", { userId, floodStrikes });
         }
         continue;
       }
-      // Other edit errors — enter fallback mode
       editSupported = false;
       fallbackPrefix = lastSentText.replace(STREAM_CURSOR, "");
       log.warn("Edit failed: entering fallback mode", { userId, error: desc });
@@ -228,9 +261,7 @@ async function streamToChat(
 
   const result = await streamPromise;
 
-  // Phase 3: final delivery
   if (editSupported && msgId) {
-    // Normal path: final edit — remove cursor, try MarkdownV2
     const finalText = truncateMD(result, MAX_MSG_LEN);
     try {
       await bot.api.editMessageText(chatId, msgId, formatResponse(finalText), { parse_mode: "MarkdownV2" });
@@ -238,7 +269,6 @@ async function streamToChat(
       try { await bot.api.editMessageText(chatId, msgId, finalText); } catch { /* ignore */ }
     }
   } else if (fallbackPrefix) {
-    // Fallback path: send only the continuation as a fresh message
     const continuation = result.slice(fallbackPrefix.length);
     if (continuation.trim()) {
       try {
@@ -246,27 +276,20 @@ async function streamToChat(
         await bot.api.sendMessage(chatId, finalText);
       } catch { /* ignore */ }
     }
-    // Try to strip cursor from the stuck preview message
-    try {
-      await bot.api.editMessageText(chatId, msgId!, fallbackPrefix);
-    } catch { /* ignore */ }
+    try { await bot.api.editMessageText(chatId, msgId!, fallbackPrefix); } catch { /* ignore */ }
   } else if (msgId) {
-    // No edits happened at all — just send the complete result
     const finalText = truncateMD(result, MAX_MSG_LEN);
-    try {
-      await bot.api.sendMessage(chatId, finalText);
-    } catch { /* ignore */ }
+    try { await bot.api.sendMessage(chatId, finalText); } catch { /* ignore */ }
   }
 
   return result;
 }
 
-
 function formatResponse(text: string): string {
   return escapeMD(text);
 }
 
-// ─── Concurrency: serialize per-user requests ───
+// ─── Concurrency ───
 
 function withLock(userId: number, fn: () => Promise<void>): void {
   const state = getState(userId);
@@ -306,7 +329,9 @@ bot.command("start", async (ctx) => {
       "/memory — View saved memories\n" +
       "/remember \\[text\\] — Save a memory\n" +
       "/forget \\[keyword\\] — Delete memories\n" +
-      "/search \\[query\\] — Search past conversations",
+      "/search \\[query\\] — Search past conversations\n" +
+      "/tools — List tools\n" +
+      "/cron — List scheduled tasks",
     { parse_mode: "MarkdownV2" },
   );
 });
@@ -314,9 +339,11 @@ bot.command("start", async (ctx) => {
 bot.command("new", async (ctx) => {
   const userId = ctx.from!.id;
   const state = getState(userId);
-  state.agent = new Agent(config, memory);
+  const agentConfig = { ...config, tools: loadedTools };
+  state.agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
+  state.agent.setMcpClients(mcpClients);
   state.sessionId = `tg_${userId}_${Date.now()}`;
-  db.createSession(state.sessionId, `Telegram ${userId}`);
+  sessionDb.createSession(state.sessionId, `Telegram ${userId}`);
   await ctx.reply("🆕 New session\\. Memories preserved\\.", { parse_mode: "MarkdownV2" });
 });
 
@@ -389,7 +416,7 @@ bot.command("search", async (ctx) => {
     await ctx.reply("Usage: /search \\[query\\]", { parse_mode: "MarkdownV2" });
     return;
   }
-  const results = db.search(query);
+  const results = sessionDb.search(query);
   if (results.length === 0) {
     await ctx.reply("No results\\.", { parse_mode: "MarkdownV2" });
     return;
@@ -401,9 +428,37 @@ bot.command("search", async (ctx) => {
   await ctx.reply(`🔍 Results:\n\n${preview}`, { parse_mode: "MarkdownV2" });
 });
 
-// ─── Message handler with streaming + concurrency ───
+bot.command("tools", async (ctx) => {
+  const toolList = loadedTools;
+  if (toolList.length === 0) {
+    await ctx.reply("No tools registered\\.", { parse_mode: "MarkdownV2" });
+    return;
+  }
+  const preview = toolList
+    .slice(0, 20)
+    .map((t) => `🔧 ${escapeMD(t.name)} — ${escapeMD(t.description.slice(0, 60))}`)
+    .join("\n");
+  await ctx.reply(`Tools \\(${toolList.length}\\):\n\n${preview}`, { parse_mode: "MarkdownV2" });
+});
 
-const KNOWN_COMMANDS = new Set(["start", "new", "reset", "history", "model", "memory", "remember", "forget", "search"]);
+bot.command("cron", async (ctx) => {
+  const jobs = cronStore.list();
+  if (jobs.length === 0) {
+    await ctx.reply("No scheduled tasks\\.", { parse_mode: "MarkdownV2" });
+    return;
+  }
+  const preview = jobs
+    .map((j) => {
+      const s = j.enabled ? "●" : "○";
+      return `${s} ${escapeMD(j.name)} \\(${j.runCount} runs\\)`;
+    })
+    .join("\n");
+  await ctx.reply(`⏰ Cron tasks:\n\n${preview}`, { parse_mode: "MarkdownV2" });
+});
+
+// ─── Message handler ───
+
+const KNOWN_COMMANDS = new Set(["start", "new", "reset", "history", "model", "memory", "remember", "forget", "search", "tools", "cron"]);
 
 bot.on("message:text", async (ctx) => {
   const userId = ctx.from!.id;
@@ -411,7 +466,6 @@ bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (!text) return;
 
-  // Drop unrecognized slash commands — only registered commands are valid
   if (text.startsWith("/")) {
     const cmd = text.slice(1).split("@")[0].split(" ")[0];
     if (!KNOWN_COMMANDS.has(cmd)) return;
@@ -426,14 +480,9 @@ bot.on("message:text", async (ctx) => {
     await setReaction(chatId, msgId, "👀");
 
     try {
-      const state = getState(userId);
       const result = await streamToChat(chatId, userId, text);
-
-      db.createSession(state.sessionId, `Telegram ${userId}`);
-      db.saveMessage(state.sessionId, { role: "user", content: text });
-      db.saveMessage(state.sessionId, { role: "assistant", content: result });
       await setReaction(chatId, msgId, "👍");
-      log.info("Chat turn completed", { userId, sessionId: state.sessionId, inputLen: text.length, outputLen: result.length });
+      log.info("Chat turn completed", { userId, inputLen: text.length, outputLen: result.length });
     } catch (err) {
       log.error("Chat failed", { userId, error: (err as Error).message });
       await setReaction(chatId, msgId, "👎");
@@ -447,7 +496,6 @@ bot.on("message:text", async (ctx) => {
 
 // ─── Start ───
 
-// Sync bot command menu (overwrites any stale BotFather commands)
 const BOT_COMMANDS = [
   { command: "new", description: "New session (memories kept)" },
   { command: "reset", description: "Reset conversation" },
@@ -457,6 +505,8 @@ const BOT_COMMANDS = [
   { command: "remember", description: "Save a memory" },
   { command: "forget", description: "Delete memories by keyword" },
   { command: "search", description: "Search past conversations" },
+  { command: "tools", description: "List registered tools" },
+  { command: "cron", description: "List scheduled tasks" },
 ];
 
 bot.start({
@@ -470,8 +520,9 @@ bot.start({
 
 process.on("SIGINT", () => {
   log.info("Shutting down (SIGINT)");
+  cronScheduler.stop();
   memory.close();
-  db.close();
+  sessionDb.close();
   log.close();
   bot.stop();
   process.exit(0);
@@ -479,8 +530,9 @@ process.on("SIGINT", () => {
 
 process.on("SIGTERM", () => {
   log.info("Shutting down (SIGTERM)");
+  cronScheduler.stop();
   memory.close();
-  db.close();
+  sessionDb.close();
   log.close();
   bot.stop();
   process.exit(0);

@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Transport } from "./base.js";
-import type { LLMConfig, Message, NormalizedResponse, ToolCall } from "../types.js";
+import type { LLMConfig, Message, NormalizedResponse, ToolCall, ToolDef } from "../types.js";
 
 export class AnthropicTransport implements Transport {
   private client: Anthropic;
@@ -12,14 +12,16 @@ export class AnthropicTransport implements Transport {
     });
   }
 
-  async send(systemPrompt: string, messages: Message[]): Promise<NormalizedResponse> {
-    const filtered = this.filterMessages(messages);
+  async send(systemPrompt: string, messages: Message[], tools?: ToolDef[]): Promise<NormalizedResponse> {
+    const formatted = this.formatAnthropicMessages(messages);
+    const toolSchemas = this.formatAnthropicTools(tools);
 
     const resp = await this.client.messages.create({
       model: this.config.model,
       system: systemPrompt,
-      messages: filtered,
+      messages: formatted,
       max_tokens: this.config.maxTokens ?? 4096,
+      ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
     return this.parseResponse(resp.content, resp.usage, resp.stop_reason);
@@ -29,33 +31,26 @@ export class AnthropicTransport implements Transport {
     systemPrompt: string,
     messages: Message[],
     onToken: (token: string) => void,
+    tools?: ToolDef[],
   ): Promise<NormalizedResponse> {
-    const filtered = this.filterMessages(messages);
+    const formatted = this.formatAnthropicMessages(messages);
+    const toolSchemas = this.formatAnthropicTools(tools);
 
     const stream = this.client.messages.stream({
       model: this.config.model,
       system: systemPrompt,
-      messages: filtered,
+      messages: formatted,
       max_tokens: this.config.maxTokens ?? 4096,
+      ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
     let content = "";
-    const toolCallBuffers: Map<string, { name: string; input: string }> = new Map();
 
     for await (const event of stream) {
       if (event.type === "content_block_delta") {
         if (event.delta.type === "text_delta") {
           content += event.delta.text;
           onToken(event.delta.text);
-        } else if (event.delta.type === "input_json_delta") {
-          // tool use partial input — we don't stream these as tokens
-        }
-      } else if (event.type === "content_block_start") {
-        if (event.content_block.type === "tool_use") {
-          toolCallBuffers.set(event.content_block.id, {
-            name: event.content_block.name,
-            input: "",
-          });
         }
       }
     }
@@ -85,13 +80,59 @@ export class AnthropicTransport implements Transport {
     };
   }
 
-  private filterMessages(messages: Message[]): Array<{ role: "user" | "assistant"; content: string }> {
-    return messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      }));
+  private formatAnthropicTools(tools?: ToolDef[]): Array<{ name: string; description: string; input_schema: Record<string, unknown> }> | undefined {
+    if (!tools || tools.length === 0) return undefined;
+    return tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: {
+        type: "object" as const,
+        ...t.parameters,
+      },
+    }));
+  }
+
+  private formatAnthropicMessages(messages: Message[]): Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }> {
+    const result: Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }> = [];
+
+    for (const m of messages) {
+      if (m.role === "system") continue;
+
+      if (m.role === "assistant") {
+        const blocks: Array<Record<string, unknown>> = [];
+        if (m.content) blocks.push({ type: "text", text: m.content });
+        if (m.toolCalls) {
+          for (const tc of m.toolCalls) {
+            blocks.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.arguments });
+          }
+        }
+        result.push({
+          role: "assistant",
+          content: blocks.length === 1 && blocks[0].type === "text" ? m.content : blocks,
+        });
+      } else if (m.role === "tool") {
+        const toolResult: Record<string, unknown> = {
+          type: "tool_result",
+          tool_use_id: m.toolCallId!,
+          content: m.content,
+        };
+        // Merge consecutive tool results into one user message (Anthropic requirement)
+        const last = result[result.length - 1];
+        if (last && last.role === "user") {
+          if (typeof last.content === "string") {
+            last.content = [{ type: "text", text: last.content }, toolResult];
+          } else {
+            (last.content as Array<Record<string, unknown>>).push(toolResult);
+          }
+        } else {
+          result.push({ role: "user", content: [toolResult] });
+        }
+      } else {
+        result.push({ role: "user", content: m.content });
+      }
+    }
+
+    return result;
   }
 
   private parseResponse(
