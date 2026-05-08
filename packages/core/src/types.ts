@@ -10,6 +10,8 @@ export interface LLMConfig {
   maxTokens?: number;
   temperature?: number;
   reasoningEffort?: ReasoningEffort;
+  apiKeys?: string[];
+  credentialStrategy?: import("./credential-pool.js").PoolStrategy;
 }
 
 export interface AgentConfig {

@@ -143,4 +143,6 @@ export class ChatCompletionsTransport implements Transport {
       arguments: JSON.parse(tc.function.arguments),
     }));
   }
+
+  getConfig() { return this.config; }
 }

@@ -228,4 +228,6 @@ export class AnthropicTransport implements Transport {
       thinking: { type: "enabled", budget_tokens: budget },
     };
   }
+
+  getConfig() { return this.config; }
 }

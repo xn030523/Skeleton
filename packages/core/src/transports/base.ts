@@ -1,4 +1,4 @@
-import type { Message, NormalizedResponse, ToolDef } from "../types.js";
+import type { LLMConfig, Message, NormalizedResponse, ToolDef } from "../types.js";
 
 export interface Transport {
   send(systemPrompt: string, messages: Message[], tools?: ToolDef[]): Promise<NormalizedResponse>;
@@ -8,4 +8,5 @@ export interface Transport {
     onToken: (token: string) => void,
     tools?: ToolDef[],
   ): Promise<NormalizedResponse>;
+  getConfig?(): LLMConfig;
 }

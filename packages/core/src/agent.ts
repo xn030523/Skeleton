@@ -26,10 +26,24 @@ import { PersonalityStore } from "./personality/index.js";
 import { mcpManageTool } from "./mcp/tools.js";
 import { toolsetManageTool } from "./tools/toolset.js";
 import { setOnToolListChanged } from "./tools/mcp.js";
+import { CredentialPool, buildCredentialPool } from "./credential-pool.js";
+import type { PooledCredential } from "./credential-pool.js";
+import { AuxiliaryClient, buildAuxiliaryClient } from "./auxiliary-client.js";
+import { redactSensitiveText } from "./redact.js";
+import { ptcTool } from "./ptc.js";
+import { moaTool } from "./moa.js";
+import { resolveReferences } from "./context/references.js";
+import { CheckpointManager } from "./checkpoint.js";
+import { ttsTool, transcriptionTool } from "./tts.js";
+import { KanbanBoard, kanbanTool } from "./kanban.js";
 
 export class Agent {
   private transport: Transport;
   private fallbackTransport: Transport | null;
+  private credentialPool: CredentialPool | null;
+  private auxiliaryClient: AuxiliaryClient;
+  private checkpoint: CheckpointManager;
+  private kanban: KanbanBoard;
   private messages: Message[] = [];
   private toolRegistry: ToolRegistry;
   private maxTurns: number;
@@ -69,6 +83,16 @@ export class Agent {
   ) {
     this.transport = this.createTransport(config.llm);
     this.fallbackTransport = config.fallback ? this.createTransport(config.fallback) : null;
+    // Credential pool: multi-key failover (only if apiKeys array is provided)
+    this.credentialPool = (config.llm.apiKeys && config.llm.apiKeys.length > 1)
+      ? buildCredentialPool(config.llm)
+      : null;
+    // Auxiliary client: separate transport for summarization/vision/title
+    this.auxiliaryClient = buildAuxiliaryClient(config.llm);
+    // Checkpoint manager for file operation snapshots
+    this.checkpoint = new CheckpointManager();
+    // Kanban board for multi-agent coordination
+    this.kanban = new KanbanBoard();
     this.toolRegistry = new ToolRegistry(config.tools ?? []);
     this.maxTurns = config.maxTurns ?? 20;
     this.basePrompt = config.systemPrompt ?? "You are Skeleton, a reverse engineering AI assistant.";
@@ -161,6 +185,26 @@ export class Agent {
     (tsTool as { emoji?: string }).emoji = "📦";
     this.toolRegistry.register(tsTool);
 
+    // Register PTC (Programmatic Tool Calling) tool
+    const ptc = ptcTool(this.toolRegistry);
+    this.toolRegistry.register(ptc);
+
+    // Register MoA (Mixture of Agents) tool
+    const moa = moaTool(config);
+    this.toolRegistry.register(moa);
+
+    // Register TTS and transcription tools
+    const tts = ttsTool();
+    (tts as { toolset?: string }).toolset = "media";
+    this.toolRegistry.register(tts);
+    const stt = transcriptionTool();
+    (stt as { toolset?: string }).toolset = "media";
+    this.toolRegistry.register(stt);
+
+    // Register Kanban tool for multi-agent coordination
+    const kb = kanbanTool(this.kanban);
+    this.toolRegistry.register(kb);
+
     // Register session search tools if SessionDB provided
     if (this.sessionDb) {
       this.sessionDb.createSession(this.sessionId);
@@ -252,6 +296,17 @@ export class Agent {
   }
 
   async run(userInput: string): Promise<string> {
+    // Resolve context references (@file:, @url:, @git:, @diff:)
+    let resolvedInput = userInput;
+    if (/@(file|url|git|diff):/.test(userInput)) {
+      try {
+        const { resolvedMessage } = await resolveReferences(userInput);
+        resolvedInput = resolvedMessage;
+      } catch (err) {
+        console.warn(`Context reference resolution failed: ${(err as Error).message}`);
+      }
+    }
+
     // Slash command: /skill-name → inject skill content as prompt
     const slashMatch = userInput.match(/^\/([a-z0-9_-]+)(?:\s+(.*))?$/);
     if (slashMatch) {
@@ -266,7 +321,7 @@ export class Agent {
         this.messages.push({ role: "user", content: enhancedInput });
         this.toolCallCount = 0;
         if (this.sessionDb) {
-          this.sessionDb.saveMessage(this.sessionId, { role: "user", content: userInput });
+          this.sessionDb.saveMessage(this.sessionId, { role: "user", content: resolvedInput });
         }
         const systemPrompt = this.buildSystemPrompt(enhancedInput);
         let result = "";
@@ -279,7 +334,7 @@ export class Agent {
           result = response.content ?? "";
         }
         if (this.toolCallCount >= 5) {
-          this.suggestSkillCreation(userInput, result);
+          this.suggestSkillCreation(resolvedInput, result);
         }
         return result;
       }
@@ -292,12 +347,12 @@ export class Agent {
       await this.compress();
     }
 
-    this.messages.push({ role: "user", content: userInput });
+    this.messages.push({ role: "user", content: resolvedInput });
     this.toolCallCount = 0;
     if (this.sessionDb) {
-      this.sessionDb.saveMessage(this.sessionId, { role: "user", content: userInput });
+      this.sessionDb.saveMessage(this.sessionId, { role: "user", content: resolvedInput });
     }
-    const systemPrompt = this.buildSystemPrompt(userInput);
+    const systemPrompt = this.buildSystemPrompt(resolvedInput);
 
     let result = "";
     for (let turn = 0; turn < this.maxTurns; turn++) {
@@ -312,7 +367,7 @@ export class Agent {
 
     // Closed-loop learning: auto-suggest skill creation for complex tasks
     if (this.toolCallCount >= 5) {
-      this.suggestSkillCreation(userInput, result);
+      this.suggestSkillCreation(resolvedInput, result);
     }
 
     return result;
@@ -461,6 +516,11 @@ export class Agent {
     this.toolCallCount++;
     this.onToolCall?.(tc.name, tc.arguments);
 
+    // Notify project context of directory visits (progressive subdirectory discovery)
+    if (tc.name === "terminal" && tc.arguments.cwd) {
+      this.projectContext.notifyDirectoryVisit(String(tc.arguments.cwd));
+    }
+
     // Guardrail check
     const guardCheck = this.guardrail.check(tc.name, tc.arguments);
     let result: unknown;
@@ -486,7 +546,9 @@ export class Agent {
     }
 
     const warnings = this.guardrail.drainWarnings();
-    const resultStr = typeof result === "string" ? result : (JSON.stringify(result) ?? String(result));
+    let resultStr = typeof result === "string" ? result : (JSON.stringify(result) ?? String(result));
+    // Redact secrets from tool output before it enters conversation context
+    resultStr = redactSensitiveText(resultStr, { force: true });
     const finalResultStr = warnings.length > 0
       ? `${resultStr}\n[GUARDRAIL WARNING: ${warnings.join("; ")}]`
       : resultStr;
@@ -551,14 +613,34 @@ export class Agent {
         lastErr = err;
         const classified = this.classifyApiError(err);
 
-        if (classified === "auth_error") {
-          throw new Error(`Authentication failed: ${(err as Error).message}`);
-        }
-        if (classified === "rate_limit" && attempt < maxRetries - 1) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
-          console.warn(`Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
+        if (classified === "auth_error" || classified === "rate_limit") {
+          // Credential pool: rotate on auth/rate-limit errors
+          if (this.credentialPool) {
+            const statusCode = (err as { status?: number })?.status ?? (classified === "auth_error" ? 401 : 429);
+            const next = this.credentialPool.markExhaustedAndRotate(statusCode);
+            if (next) {
+              // Rebuild transport with new credential
+              const currentConfig = this.transport.getConfig?.();
+              if (currentConfig) {
+                this.transport = this.createTransport({
+                  ...currentConfig,
+                  apiKey: next.apiKey,
+                  baseUrl: next.baseUrl ?? currentConfig.baseUrl,
+                });
+              }
+              console.log(`Credential pool: rotated to "${next.label}", retrying immediately`);
+              continue; // Retry immediately with new credential (no backoff)
+            }
+          }
+          if (classified === "auth_error") {
+            throw new Error(`Authentication failed: ${(err as Error).message}`);
+          }
+          if (attempt < maxRetries - 1) {
+            const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+            console.warn(`Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
         }
         if (classified === "timeout" && attempt < maxRetries - 1) {
           console.warn(`Request timed out, retrying (attempt ${attempt + 1}/${maxRetries})`);
@@ -691,6 +773,8 @@ export class Agent {
   getMemory(): MemoryStore | null { return this.memory; }
   getUserProfile(): UserProfile | null { return this.userProfile; }
   getApprovalSystem(): ApprovalSystem { return this.approval; }
+  getCredentialPool(): CredentialPool | null { return this.credentialPool; }
+  getAuxiliaryClient(): AuxiliaryClient { return this.auxiliaryClient; }
 
   getHistory(): Message[] { return [...this.messages]; }
   reset(): void { this.messages = []; }
@@ -709,24 +793,21 @@ export class Agent {
       return m;
     });
 
-    const summarizationPrompt =
+    const conversationText = prunedMessages.map((m) => {
+      const content = (m.content ?? "").slice(0, 500);
+      const tcSummary = m.toolCalls ? ` [tools: ${m.toolCalls.map(tc => tc.name).join(", ")}]` : "";
+      return `[${m.role}]${tcSummary}: ${content}`;
+    }).join("\n");
+
+    // Use auxiliary client for summarization (doesn't consume main session quota)
+    const summary = await this.auxiliaryClient.summarize(
+      conversationText,
       "Produce a structured summary with these sections:\n" +
       "## Resolved\n- What was accomplished, key answers found, decisions made\n" +
       "## Pending\n- Unresolved questions, in-progress tasks, next steps\n" +
       "## Key Facts\n- Technical details, file paths, variable values, API endpoints, error messages\n\n" +
-      "Be terse and information-dense. Preserve exact values (paths, IDs, hashes) verbatim.\n\n" +
-      prunedMessages.map((m) => {
-        const content = (m.content ?? "").slice(0, 500);
-        const tcSummary = m.toolCalls ? ` [tools: ${m.toolCalls.map(tc => tc.name).join(", ")}]` : "";
-        return `[${m.role}]${tcSummary}: ${content}`;
-      }).join("\n");
-
-    const tempMessages = [...this.messages];
-    this.messages = [{ role: "user", content: summarizationPrompt }];
-    const result = await this.callWithFallback(
-      "You are a conversation summarizer. Produce a dense, structured summary preserving all key information.",
+      "Be terse and information-dense. Preserve exact values (paths, IDs, hashes) verbatim.",
     );
-    const summary = result.content ?? "";
 
     // Create compressed session in DB
     if (this.sessionDb) {
@@ -739,11 +820,12 @@ export class Agent {
     }
 
     // Replace messages with summary
+    const tempCount = this.messages.length;
     this.messages = [
       { role: "assistant", content: `[Previous context compressed]\n${summary}` },
     ];
 
-    return `Compressed ${tempMessages.length} messages into summary (${summary.length} chars).`;
+    return `Compressed ${tempCount} messages into summary (${summary.length} chars).`;
   }
 
   /** Undo last turn: remove last user + assistant pair */
