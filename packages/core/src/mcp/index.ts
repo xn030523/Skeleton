@@ -2,11 +2,13 @@ import type { McpServerConfig } from "../config/index.js";
 import { BUILTIN_MCP_SERVERS } from "./servers.js";
 import { MCP_CATEGORIES } from "./types.js";
 import type { BuiltinMcpServer, McpCategory } from "./types.js";
+import { isCommandAvailable } from "./resolve.js";
 
 export type { BuiltinMcpServer, McpCategory } from "./types.js";
 export { MCP_CATEGORIES } from "./types.js";
 export { mcpManageTool } from "./tools.js";
 export { SkeletonMcpHost } from "./host.js";
+export { resolveCommand, isCommandAvailable, checkCommandAvailability } from "./resolve.js";
 
 /**
  * Build merged MCP servers config.
@@ -56,6 +58,14 @@ export function buildMcpServersConfig(
         );
         continue;
       }
+    }
+
+    // Command must exist on the system (Hermes-style shutil.which() check)
+    if (builtin.config.command && !isCommandAvailable(builtin.config.command)) {
+      console.warn(
+        `  MCP "${builtin.name}" enabled but command "${builtin.config.command}" not found. Skipping. Install the required tool or remove SKELETON_MCP_${builtin.name.replace(/-/g, "_").toUpperCase()}=true.`,
+      );
+      continue;
     }
 
     servers[builtin.name] = builtin.config;

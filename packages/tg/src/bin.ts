@@ -591,10 +591,14 @@ bot.command("retry", async (ctx) => {
 bot.command("usage", async (ctx) => {
   const agent = getState(ctx.from!.id).agent;
   const usage = agent.getUsage();
+  const ctxProg = agent.getContextProgress();
+  const ctxPct = ctxProg.percent;
+  const ctxEmoji = ctxPct >= 95 ? "🔴" : ctxPct >= 80 ? "🟠" : ctxPct >= 50 ? "🟡" : "🟢";
   const lines = [
     `📊 *Usage Stats*`,
     `Last turn: ${usage.last.promptTokens} prompt / ${usage.last.completionTokens} completion tokens`,
     `Session: ${usage.total.promptTokens} prompt / ${usage.total.completionTokens} completion / ${usage.total.turns} turns`,
+    `${ctxEmoji} Context: ${ctxProg.usedTokens.toLocaleString()} / ${ctxProg.contextWindow.toLocaleString()} (${ctxPct}%)`,
   ];
   await ctx.reply(lines.join("\n"), { parse_mode: "MarkdownV2" });
 });

@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ToolDef } from "../types.js";
 import type { McpServerConfig } from "../config/index.js";
+import { isCommandAvailable, checkCommandAvailability } from "../mcp/resolve.js";
 
 type ToolListChangedCallback = (serverName: string) => void;
 
@@ -118,6 +119,13 @@ export async function connectMcpServer(name: string, config: McpServerConfig): P
       requestInit: { headers: config.headers },
     });
   } else if (config.command) {
+    // Pre-flight: verify command exists before spawning subprocess (Hermes-style)
+    if (!isCommandAvailable(config.command)) {
+      const cmdCheck = checkCommandAvailability(config.command);
+      const hint = cmdCheck.installHint ?? "Install the required tool and try again.";
+      throw new Error(`MCP server "${name}": command "${config.command}" not found on this system. ${hint}`);
+    }
+
     transport = new StdioClientTransport({
       command: config.command,
       args: config.args ?? [],

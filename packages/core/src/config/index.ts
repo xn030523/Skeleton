@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import type { AgentConfig, LLMConfig, Protocol, ReasoningEffort, ToolDef } from "../types.js";
 import { builtInTools } from "../tools/index.js";
@@ -9,6 +10,8 @@ import { MemoryStore } from "../memory/store.js";
 import { UserProfile } from "../memory/user-profile.js";
 import { memoryTools } from "../memory/tools.js";
 import { CronStore } from "../cron/store.js";
+import { findProvider, resolveProviderConfig } from "../providers/registry.js";
+import "../providers/profiles.js";
 
 export interface McpServerConfig {
   command?: string;
@@ -30,6 +33,11 @@ export function loadConfig(configPath?: string): AgentConfig {
     maxTurns: yamlConfig.agent?.maxTurns ?? 20,
     systemPrompt: yamlConfig.agent?.systemPrompt ?? defaultPrompt(),
     skills: resolveSkillConfig(yamlConfig.skills),
+    compression: yamlConfig.compression,
+    behavior: yamlConfig.behavior ?? yamlConfig.agent?.behavior,
+    toolOutput: yamlConfig.toolOutput,
+    fileRead: yamlConfig.fileRead,
+    auxiliary: yamlConfig.auxiliary,
     _rawToolConfig: yamlConfig.tools,
     _rawMcpConfig: yamlConfig.mcp,
   } as AgentConfig & { _rawToolConfig?: RawToolConfig; _rawMcpConfig?: RawMcpConfig; skills?: SkillConfig };
@@ -101,6 +109,17 @@ export async function loadTools(
 }
 
 function resolveLLM(partial: Partial<LLMConfig> = {}): LLMConfig {
+  // 1. Provider-based resolution: if provider name specified, resolve from profile
+  const providerName = partial.provider ?? env("SKELETON_PROVIDER");
+  if (providerName) {
+    const profile = findProvider(providerName);
+    if (profile) {
+      return resolveProviderConfig(profile, partial);
+    }
+    console.warn(`Unknown provider "${providerName}", falling back to manual config`);
+  }
+
+  // 2. Legacy resolution: SKELETON_PROTOCOL + SKELETON_API_KEY + SKELETON_BASE_URL
   const protocol: Protocol = partial.protocol ?? (env("SKELETON_PROTOCOL") as Protocol) ?? "openai";
   const apiKey = partial.apiKey ?? env("SKELETON_API_KEY") ?? "";
   const baseUrl = partial.baseUrl ?? env("SKELETON_BASE_URL") ?? defaultBaseUrl(protocol);
@@ -163,10 +182,16 @@ interface RawConfig {
   agent?: {
     maxTurns?: number;
     systemPrompt?: string;
+    behavior?: AgentConfig["behavior"];
   };
   tools?: RawToolConfig;
   mcp?: RawMcpConfig;
   skills?: SkillConfig;
+  compression?: AgentConfig["compression"];
+  behavior?: AgentConfig["behavior"];
+  toolOutput?: AgentConfig["toolOutput"];
+  fileRead?: AgentConfig["fileRead"];
+  auxiliary?: AgentConfig["auxiliary"];
 }
 
 function loadYaml(configPath?: string): RawConfig {
@@ -174,13 +199,32 @@ function loadYaml(configPath?: string): RawConfig {
     configPath,
     path.join(process.cwd(), "skeleton.yaml"),
     path.join(process.cwd(), "skeleton.yml"),
-    path.join(process.env.HOME ?? "~", ".skeleton", "config.yaml"),
+    path.join(os.homedir(), ".skeleton", "config.yaml"),
   ].filter(Boolean) as string[];
 
   for (const p of searchPaths) {
     if (fs.existsSync(p)) {
-      return parseYaml(fs.readFileSync(p, "utf-8")) as RawConfig;
+      const raw = fs.readFileSync(p, "utf-8");
+      // Substitute ${VAR} references with env var values (Hermes-style)
+      const substituted = substituteEnvVars(raw);
+      return parseYaml(substituted) as RawConfig;
     }
   }
   return {};
+}
+
+/**
+ * Replace ${VAR_NAME} patterns in YAML text with environment variable values.
+ * Also supports ${VAR_NAME:-default} syntax for default values.
+ *
+ * This matches Hermes's config.yaml ${VAR} substitution pattern.
+ */
+function substituteEnvVars(text: string): string {
+  // Match ${VAR} or ${VAR:-default}
+  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_match, varName, defaultVal) => {
+    const envVal = process.env[varName];
+    if (envVal !== undefined && envVal !== "") return envVal;
+    if (defaultVal !== undefined) return defaultVal;
+    return ""; // Unset var with no default → empty string
+  });
 }

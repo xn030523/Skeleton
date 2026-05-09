@@ -78,3 +78,49 @@ export function stopSpinner() {
     spinTimer = null;
   }
 }
+
+// ─── Context Window Progress Bar (Hermes-style) ──────────────────────────────
+
+const FILLED = "█";
+const EMPTY = "░";
+
+/** Format token count compactly: 12450 → "12.4K", 131072 → "128K", 1048576 → "1M" */
+export function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return m === Math.floor(m) ? `${m}M` : `${m.toFixed(1)}M`;
+  }
+  if (tokens >= 1000) {
+    const k = tokens / 1000;
+    return k === Math.floor(k) ? `${k}K` : `${k.toFixed(1)}K`;
+  }
+  return String(tokens);
+}
+
+/** Build a Unicode block-character progress bar: [██████░░░░] */
+export function buildContextBar(percent: number, width = 10): string {
+  const safe = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((safe / 100) * width);
+  return FILLED.repeat(filled) + EMPTY.repeat(Math.max(0, width - filled));
+}
+
+/** Get color for context bar based on usage percent (Hermes thresholds) */
+export function contextBarColor(percent: number): "green" | "yellow" | "red" | "magenta" {
+  if (percent >= 95) return "red";
+  if (percent >= 80) return "magenta";
+  if (percent >= 50) return "yellow";
+  return "green";
+}
+
+/** Render full context status string: "12.4K/128K [█████░░░░░] 50%" */
+export function renderContextProgress(
+  usedTokens: number,
+  contextWindow: number,
+  percent: number,
+): string {
+  const used = formatTokenCount(usedTokens);
+  const total = formatTokenCount(contextWindow);
+  const bar = buildContextBar(percent);
+  const color = contextBarColor(percent);
+  return `${chalk[color](bar)} ${chalk.gray(`${used}/${total}`)} ${chalk[color](`${percent}%`)}`;
+}

@@ -8,3 +8,4 @@ dist/
 .DS_Store
 Thumbs.db
 .skeleton
+.cdp-tools

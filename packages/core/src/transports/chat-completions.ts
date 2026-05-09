@@ -1,15 +1,42 @@
 import OpenAI from "openai";
 import type { Transport } from "./base.js";
 import type { LLMConfig, Message, NormalizedResponse, ToolCall, ToolDef } from "../types.js";
+import type { ProviderQuirks } from "../providers/registry.js";
+import { findProvider } from "../providers/registry.js";
+
+export interface ChatCompletionsTransportOptions {
+  quirks?: ProviderQuirks;
+}
 
 export class ChatCompletionsTransport implements Transport {
   private client: OpenAI;
+  private quirks: ProviderQuirks;
 
-  constructor(private config: LLMConfig) {
-    this.client = new OpenAI({
-      apiKey: config.apiKey,
-      baseURL: `${config.baseUrl}/v1`,
-    });
+  constructor(private config: LLMConfig, options?: ChatCompletionsTransportOptions) {
+    this.quirks = options?.quirks ?? this.inferQuirks();
+
+    const clientOpts: OpenAI.ClientOptions = {
+      apiKey: config.apiKey || (this.quirks.skipApiKey ? "sk-no-key-required" : undefined),
+      baseURL: config.baseUrl,
+    };
+
+    // Azure uses api-key header instead of Authorization: Bearer
+    if (this.quirks.authMode === "api-key") {
+      clientOpts.defaultHeaders = {
+        ...clientOpts.defaultHeaders,
+        "api-key": config.apiKey,
+      };
+    }
+
+    // Custom headers from provider quirks (Kimi User-Agent, OpenRouter referer, etc.)
+    if (this.quirks.customHeaders) {
+      clientOpts.defaultHeaders = {
+        ...clientOpts.defaultHeaders,
+        ...this.quirks.customHeaders,
+      };
+    }
+
+    this.client = new OpenAI(clientOpts);
   }
 
   async send(systemPrompt: string, messages: Message[], tools?: ToolDef[]): Promise<NormalizedResponse> {
@@ -57,12 +84,14 @@ export class ChatCompletionsTransport implements Transport {
       max_tokens: this.config.maxTokens ?? 4096,
       temperature: this.config.temperature ?? 0.3,
       stream: true,
+      stream_options: { include_usage: true },
       ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
     });
 
     let content = "";
     const toolCallBuffers: Map<number, { id: string; name: string; args: string }> = new Map();
+    let streamUsage: { promptTokens: number; completionTokens: number; totalTokens: number } | undefined;
 
     for await (const chunk of stream) {
       const delta = chunk.choices[0]?.delta;
@@ -83,6 +112,15 @@ export class ChatCompletionsTransport implements Transport {
           if (tc.function?.arguments) buf.args += tc.function.arguments;
         }
       }
+
+      // Extract usage from final chunk (OpenAI sends usage in last chunk with stream_options)
+      if (chunk.usage) {
+        streamUsage = {
+          promptTokens: chunk.usage.prompt_tokens,
+          completionTokens: chunk.usage.completion_tokens,
+          totalTokens: chunk.usage.total_tokens,
+        };
+      }
     }
 
     const toolCalls: ToolCall[] = [...toolCallBuffers.values()].map((buf) => ({
@@ -94,13 +132,23 @@ export class ChatCompletionsTransport implements Transport {
     return {
       content,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: streamUsage,
       finishReason: "stop",
     };
   }
 
   private formatOpenAITools(tools?: ToolDef[]): Array<{ type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }> | undefined {
     if (!tools || tools.length === 0) return undefined;
-    return tools.map((t) => ({
+
+    // Deduplicate tool names (some endpoints reject duplicates)
+    const seen = new Set<string>();
+    const deduped = tools.filter(t => {
+      if (seen.has(t.name)) return false;
+      seen.add(t.name);
+      return true;
+    });
+
+    return deduped.map((t) => ({
       type: "function" as const,
       function: {
         name: t.name,
@@ -116,7 +164,7 @@ export class ChatCompletionsTransport implements Transport {
       ...messages.map((m) => {
         const base: Record<string, unknown> = {
           role: m.role as "user" | "assistant" | "tool",
-          content: m.content,
+          content: m.content || "(empty message)",
         };
         if (m.role === "assistant" && m.toolCalls) {
           base.tool_calls = m.toolCalls.map((tc) => ({
@@ -142,6 +190,13 @@ export class ChatCompletionsTransport implements Transport {
       name: tc.function.name,
       arguments: JSON.parse(tc.function.arguments),
     }));
+  }
+
+  /** Infer quirks from provider name in LLMConfig */
+  private inferQuirks(): ProviderQuirks {
+    if (!this.config.provider) return {};
+    const profile = findProvider(this.config.provider);
+    return profile?.quirks ?? {};
   }
 
   getConfig() { return this.config; }

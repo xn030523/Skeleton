@@ -8,3 +8,7 @@ export { workingMemoryTools } from "./working-tools.js";
 export { HonchoUserModel } from "./honcho.js";
 export type { Hypothesis, HonchoProfile } from "./honcho.js";
 export { honchoTools } from "./honcho-tools.js";
+export { HolographicMemory } from "./holographic.js";
+export type { HRRVector } from "./holographic.js";
+export type { MemoryPlugin } from "./plugins.js";
+export { Mem0Plugin, InMemoryPlugin, createMemoryPlugin } from "./plugins.js";

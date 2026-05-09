@@ -1,7 +1,6 @@
 import type { AgentConfig, Message, NormalizedResponse, ToolCall, ToolDef } from "./types.js";
 import type { McpServerConfig } from "./config/index.js";
-import { ChatCompletionsTransport } from "./transports/chat-completions.js";
-import { AnthropicTransport } from "./transports/anthropic.js";
+import { createTransportFromConfig } from "./transports/factory.js";
 import type { Transport } from "./transports/base.js";
 import { ToolRegistry } from "./tools/registry.js";
 import { ApprovalSystem } from "./tools/approval.js";
@@ -30,12 +29,17 @@ import { CredentialPool, buildCredentialPool } from "./credential-pool.js";
 import type { PooledCredential } from "./credential-pool.js";
 import { AuxiliaryClient, buildAuxiliaryClient } from "./auxiliary-client.js";
 import { redactSensitiveText } from "./redact.js";
+import { classifyError, jitteredBackoff } from "./errors/classifier.js";
+import type { ClassifiedError } from "./errors/classifier.js";
 import { ptcTool } from "./ptc.js";
 import { moaTool } from "./moa.js";
 import { resolveReferences } from "./context/references.js";
 import { CheckpointManager } from "./checkpoint.js";
 import { ttsTool, transcriptionTool } from "./tts.js";
 import { KanbanBoard, kanbanTool } from "./kanban.js";
+import { getModelMetadata, getContextWindow } from "./tools/model-metadata.js";
+import { ContextCompressor } from "./context/compressor.js";
+import { GoalManager } from "./goals/index.js";
 
 export class Agent {
   private transport: Transport;
@@ -44,6 +48,19 @@ export class Agent {
   private auxiliaryClient: AuxiliaryClient;
   private checkpoint: CheckpointManager;
   private kanban: KanbanBoard;
+  private compressor: ContextCompressor;
+  private goalManager: GoalManager;
+  /** Agent behavior config (Phase 2) */
+  private timeoutMs: number;
+  private apiMaxRetries: number;
+  private retryBackoffMs: number;
+  private toolUseEnforcement: "auto" | boolean;
+  private notifyIntervalMs: number;
+  /** Tool output limits (Phase 4) */
+  private toolOutputMaxBytes: number;
+  private toolOutputMaxLines: number;
+  private toolOutputMaxLineLength: number;
+  private fileReadMaxChars: number;
   private messages: Message[] = [];
   private toolRegistry: ToolRegistry;
   private maxTurns: number;
@@ -67,10 +84,21 @@ export class Agent {
   private personality: PersonalityStore;
   private lastUsage: { promptTokens: number; completionTokens: number } = { promptTokens: 0, completionTokens: 0 };
   private totalUsage: { promptTokens: number; completionTokens: number; turns: number } = { promptTokens: 0, completionTokens: 0, turns: 0 };
+  private model: string;
+  private contextWindow: number;
 
   // Tool progress callbacks (registered by CLI/TG for display)
+  // Legacy signature: (name, args) / (name, preview)
   onToolCall?: (name: string, args: Record<string, unknown>) => void;
   onToolResult?: (name: string, preview: string) => void;
+  // New structured signature: fires after tool completes with duration + error state
+  onToolComplete?: (info: {
+    name: string;
+    args: Record<string, unknown>;
+    duration: number;
+    isError: boolean;
+    resultPreview: string;
+  }) => void;
 
   constructor(
     config: AgentConfig & { skills?: SkillConfig },
@@ -88,14 +116,32 @@ export class Agent {
       ? buildCredentialPool(config.llm)
       : null;
     // Auxiliary client: separate transport for summarization/vision/title
-    this.auxiliaryClient = buildAuxiliaryClient(config.llm);
+    // Phase 3: pass per-task auxiliary config for per-task model routing
+    this.auxiliaryClient = buildAuxiliaryClient(config.llm, config.auxiliary);
     // Checkpoint manager for file operation snapshots
     this.checkpoint = new CheckpointManager();
     // Kanban board for multi-agent coordination
     this.kanban = new KanbanBoard();
+    // Context compressor with configurable strategy
+    this.compressor = new ContextCompressor(config.compression);
+    // Goal manager for autonomous multi-turn work (Ralph Loop)
+    this.goalManager = new GoalManager();
+    // Agent behavior config (Phase 2)
+    this.timeoutMs = config.behavior?.timeoutMs ?? 0;
+    this.apiMaxRetries = config.behavior?.apiMaxRetries ?? 3;
+    this.retryBackoffMs = config.behavior?.retryBackoffMs ?? 1000;
+    this.toolUseEnforcement = config.behavior?.toolUseEnforcement ?? "auto";
+    this.notifyIntervalMs = config.behavior?.notifyIntervalMs ?? 0;
+    // Tool output limits (Phase 4)
+    this.toolOutputMaxBytes = config.toolOutput?.maxBytes ?? 50_000;
+    this.toolOutputMaxLines = config.toolOutput?.maxLines ?? 2000;
+    this.toolOutputMaxLineLength = config.toolOutput?.maxLineLength ?? 2000;
+    this.fileReadMaxChars = config.fileRead?.maxChars ?? 100_000;
     this.toolRegistry = new ToolRegistry(config.tools ?? []);
     this.maxTurns = config.maxTurns ?? 20;
     this.basePrompt = config.systemPrompt ?? "You are Skeleton, a reverse engineering AI assistant.";
+    this.model = config.llm.model;
+    this.contextWindow = getContextWindow(config.llm.model);
     this.memory = memory ?? null;
     this.userProfile = userProfile ?? null;
     this.sessionDb = sessionDb ?? null;
@@ -286,8 +332,7 @@ export class Agent {
   }
 
   private createTransport(llm: AgentConfig["llm"]): Transport {
-    if (llm.protocol === "anthropic") return new AnthropicTransport(llm);
-    return new ChatCompletionsTransport(llm);
+    return createTransportFromConfig(llm);
   }
 
   private get tools(): ToolDef[] | undefined {
@@ -296,6 +341,22 @@ export class Agent {
   }
 
   async run(userInput: string): Promise<string> {
+    // Apply timeout if configured (Phase 2)
+    if (this.timeoutMs > 0) {
+      return await Promise.race([
+        this._run(userInput),
+        new Promise<string>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Agent timeout after ${this.timeoutMs}ms`)),
+            this.timeoutMs,
+          ),
+        ),
+      ]);
+    }
+    return await this._run(userInput);
+  }
+
+  private async _run(userInput: string): Promise<string> {
     // Resolve context references (@file:, @url:, @git:, @diff:)
     let resolvedInput = userInput;
     if (/@(file|url|git|diff):/.test(userInput)) {
@@ -340,10 +401,9 @@ export class Agent {
       }
     }
 
-    // Auto-compress when context grows large (prevent token overflow)
-    const COMPRESS_THRESHOLD = 50;
-    if (this.messages.length > COMPRESS_THRESHOLD) {
-      console.log(`Auto-compressing ${this.messages.length} messages (threshold: ${COMPRESS_THRESHOLD})`);
+    // Auto-compress when context usage exceeds threshold
+    if (this.compressor.shouldCompress(this.messages, this.contextWindow)) {
+      console.log(`Auto-compressing ${this.messages.length} messages (context usage exceeded threshold)`);
       await this.compress();
     }
 
@@ -370,7 +430,87 @@ export class Agent {
       this.suggestSkillCreation(resolvedInput, result);
     }
 
+    // ── Goal Loop (Ralph Loop) — autonomous multi-turn continuation ──
+    // If this session has an active goal, judge whether it's done.
+    // If not, auto-feed a continuation prompt back into run().
+    result = await this.maybeRunGoalLoop(result);
+
     return result;
+  }
+
+  /**
+   * Goal loop: after each run, check if the active goal is satisfied.
+   * If not, auto-inject a continuation prompt and recurse.
+   *
+   * Exits when: goal done, turn budget exhausted, user message preempts,
+   * or judge hits too many parse failures.
+   */
+  private async maybeRunGoalLoop(lastResult: string): Promise<string> {
+    if (!this.goalManager.hasActiveGoal(this.sessionId)) {
+      return lastResult;
+    }
+
+    const goal = this.goalManager.getGoal(this.sessionId);
+    if (!goal) return lastResult;
+
+    // Increment turn counter
+    this.goalManager.incrementTurns(this.sessionId);
+
+    // Check if budget exhausted after increment
+    const updatedGoal = this.goalManager.getGoal(this.sessionId);
+    if (!updatedGoal || updatedGoal.status !== "active") {
+      return lastResult;
+    }
+
+    // Judge whether the goal is satisfied
+    try {
+      const verdict = await this.auxiliaryClient.judgeGoal(goal.goal, lastResult);
+      this.goalManager.recordVerdict(
+        this.sessionId,
+        verdict.done ? "done" : "continue",
+        verdict.reason,
+      );
+
+      if (verdict.done) {
+        return `${lastResult}\n\n[Goal complete: ${verdict.reason}]`;
+      }
+
+      // Continue: inject continuation prompt back into run()
+      const continuation = this.goalManager.buildContinuationPrompt(this.sessionId);
+      if (continuation && updatedGoal.status === "active") {
+        console.log(`[Goal loop] Continuing (turn ${updatedGoal.turnsUsed}/${updatedGoal.maxTurns})`);
+        return await this.run(continuation);
+      }
+    } catch (err) {
+      this.goalManager.recordVerdict(this.sessionId, "skipped", `judge error: ${(err as Error).message}`);
+    }
+
+    return lastResult;
+  }
+
+  /** Public API: set or update the goal for this session */
+  setGoal(goal: string, maxTurns?: number): void {
+    this.goalManager.setGoal(this.sessionId, goal, maxTurns);
+  }
+
+  /** Public API: get the current goal state */
+  getGoal() {
+    return this.goalManager.getGoal(this.sessionId);
+  }
+
+  /** Public API: pause the goal loop */
+  pauseGoal(reason?: string): void {
+    this.goalManager.pauseGoal(this.sessionId, reason);
+  }
+
+  /** Public API: resume a paused goal */
+  resumeGoal(): boolean {
+    return this.goalManager.resumeGoal(this.sessionId);
+  }
+
+  /** Public API: clear the goal entirely */
+  clearGoal(): void {
+    this.goalManager.clearGoal(this.sessionId);
   }
 
   async runStream(userInput: string, onToken: (token: string) => void): Promise<string> {
@@ -512,7 +652,8 @@ export class Agent {
     return { parallel, serial };
   }
 
-  private async executeToolCall(tc: ToolCall): Promise<{ tc: ToolCall; resultStr: string }> {
+  private async executeToolCall(tc: ToolCall): Promise<{ tc: ToolCall; resultStr: string; duration: number; isError: boolean }> {
+    const startTime = Date.now();
     this.toolCallCount++;
     this.onToolCall?.(tc.name, tc.arguments);
 
@@ -524,23 +665,29 @@ export class Agent {
     // Guardrail check
     const guardCheck = this.guardrail.check(tc.name, tc.arguments);
     let result: unknown;
+    let isError = false;
 
     if (!guardCheck.allow) {
       result = `GUARDRAIL: ${guardCheck.reason}`;
       this.guardrail.record(tc.name, tc.arguments, "blocked");
+      isError = true;
     } else {
       const approval = await this.approval.checkApproval(tc.name, tc.arguments);
       if (!approval.approved) {
         result = `BLOCKED: ${approval.reason ?? "Operation requires approval"}`;
         this.guardrail.record(tc.name, tc.arguments, "blocked");
+        isError = true;
       } else {
         try {
           result = await this.toolRegistry.execute(tc.name, tc.arguments);
           const r = typeof result === "string" ? result : (JSON.stringify(result) ?? String(result));
-          this.guardrail.record(tc.name, tc.arguments, r.startsWith("error") || r.includes('"error"') ? "error" : "success");
+          const resultIsError = r.startsWith("error") || r.includes('"error"');
+          this.guardrail.record(tc.name, tc.arguments, resultIsError ? "error" : "success");
+          if (resultIsError) isError = true;
         } catch (err) {
           result = `Error: ${(err as Error).message}`;
           this.guardrail.record(tc.name, tc.arguments, "error");
+          isError = true;
         }
       }
     }
@@ -549,11 +696,86 @@ export class Agent {
     let resultStr = typeof result === "string" ? result : (JSON.stringify(result) ?? String(result));
     // Redact secrets from tool output before it enters conversation context
     resultStr = redactSensitiveText(resultStr, { force: true });
+    // Apply tool output limits (Phase 4)
+    resultStr = this.applyToolOutputLimits(tc.name, resultStr);
     const finalResultStr = warnings.length > 0
       ? `${resultStr}\n[GUARDRAIL WARNING: ${warnings.join("; ")}]`
       : resultStr;
 
-    return { tc, resultStr: finalResultStr };
+    const duration = (Date.now() - startTime) / 1000;
+
+    // Fire new structured completion callback
+    this.onToolComplete?.({
+      name: tc.name,
+      args: tc.arguments,
+      duration,
+      isError,
+      resultPreview: finalResultStr.slice(0, 200),
+    });
+
+    return { tc, resultStr: finalResultStr, duration, isError };
+  }
+
+  /**
+   * Apply tool output size limits (Phase 4): prevent super-large outputs
+   * from eating the context window.
+   *
+   * - terminal/bash: truncate to maxBytes (keep head + tail)
+   * - read_file: cap at fileReadMaxChars (user should paginate)
+   * - all tools: enforce maxLineLength per line
+   */
+  private applyToolOutputLimits(toolName: string, output: string): string {
+    if (!output) return output;
+
+    // Per-tool caps
+    let maxBytes: number;
+    if (toolName === "terminal" || toolName === "bash" || toolName === "execute_code") {
+      maxBytes = this.toolOutputMaxBytes;
+    } else if (toolName === "read_file") {
+      maxBytes = this.fileReadMaxChars;
+    } else {
+      // Default cap for all other tools (match terminal cap)
+      maxBytes = this.toolOutputMaxBytes;
+    }
+
+    // Byte cap (head + tail)
+    if (output.length > maxBytes) {
+      const head = Math.floor(maxBytes * 0.6);
+      const tail = Math.floor(maxBytes * 0.4);
+      const truncated = output.length - head - tail;
+      output = `${output.slice(0, head)}\n\n[... ${truncated} chars truncated (cap: ${maxBytes}). Use pagination/offset to see more ...]\n\n${output.slice(-tail)}`;
+    }
+
+    // Line length cap
+    if (this.toolOutputMaxLineLength > 0) {
+      const lines = output.split("\n");
+      let anyTruncated = false;
+      const capped = lines.map((line) => {
+        if (line.length > this.toolOutputMaxLineLength) {
+          anyTruncated = true;
+          return line.slice(0, this.toolOutputMaxLineLength) + `... [line truncated: ${line.length - this.toolOutputMaxLineLength} chars]`;
+        }
+        return line;
+      });
+      if (anyTruncated) output = capped.join("\n");
+    }
+
+    // Line count cap
+    if (this.toolOutputMaxLines > 0) {
+      const lines = output.split("\n");
+      if (lines.length > this.toolOutputMaxLines) {
+        const headLines = Math.floor(this.toolOutputMaxLines * 0.6);
+        const tailLines = Math.floor(this.toolOutputMaxLines * 0.4);
+        const dropped = lines.length - headLines - tailLines;
+        output = [
+          ...lines.slice(0, headLines),
+          `\n[... ${dropped} lines truncated (cap: ${this.toolOutputMaxLines}) ...]\n`,
+          ...lines.slice(-tailLines),
+        ].join("\n");
+      }
+    }
+
+    return output;
   }
 
   private autoSaveMemory(content: string): void {
@@ -587,6 +809,7 @@ export class Agent {
     return this.retryWithFallback(
       () => this.transport.send(systemPrompt, this.messages, this.tools),
       () => this.fallbackTransport?.send(systemPrompt, this.messages, this.tools),
+      this.apiMaxRetries,
     );
   }
 
@@ -597,6 +820,7 @@ export class Agent {
     return this.retryWithFallback(
       () => this.transport.sendStream(systemPrompt, this.messages, onToken, this.tools),
       () => this.fallbackTransport?.sendStream(systemPrompt, this.messages, onToken, this.tools),
+      this.apiMaxRetries,
     );
   }
 
@@ -605,76 +829,66 @@ export class Agent {
     fallback: () => Promise<NormalizedResponse> | undefined,
     maxRetries = 3,
   ): Promise<NormalizedResponse> {
+    let lastClassified: ClassifiedError | null = null;
     let lastErr: unknown;
+
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         return await primary();
       } catch (err) {
         lastErr = err;
-        const classified = this.classifyApiError(err);
+        lastClassified = classifyError(err);
+        const { category, action, retryable } = lastClassified;
 
-        if (classified === "auth_error" || classified === "rate_limit") {
-          // Credential pool: rotate on auth/rate-limit errors
-          if (this.credentialPool) {
-            const statusCode = (err as { status?: number })?.status ?? (classified === "auth_error" ? 401 : 429);
-            const next = this.credentialPool.markExhaustedAndRotate(statusCode);
-            if (next) {
-              // Rebuild transport with new credential
-              const currentConfig = this.transport.getConfig?.();
-              if (currentConfig) {
-                this.transport = this.createTransport({
-                  ...currentConfig,
-                  apiKey: next.apiKey,
-                  baseUrl: next.baseUrl ?? currentConfig.baseUrl,
-                });
-              }
-              console.log(`Credential pool: rotated to "${next.label}", retrying immediately`);
-              continue; // Retry immediately with new credential (no backoff)
+        // Rotate credential on auth/rate-limit errors
+        if ((action === "rotate_credential") && this.credentialPool) {
+          const statusCode = lastClassified.statusCode ?? (category.startsWith("auth") ? 401 : 429);
+          const next = this.credentialPool.markExhaustedAndRotate(statusCode);
+          if (next) {
+            const currentConfig = this.transport.getConfig?.();
+            if (currentConfig) {
+              this.transport = this.createTransport({
+                ...currentConfig,
+                apiKey: next.apiKey,
+                baseUrl: next.baseUrl ?? currentConfig.baseUrl,
+              });
             }
-          }
-          if (classified === "auth_error") {
-            throw new Error(`Authentication failed: ${(err as Error).message}`);
-          }
-          if (attempt < maxRetries - 1) {
-            const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
-            console.warn(`Rate limited, retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
-            await new Promise(r => setTimeout(r, delay));
+            console.log(`Credential pool: rotated to "${next.label}" [${category}]`);
             continue;
           }
         }
-        if (classified === "timeout" && attempt < maxRetries - 1) {
-          console.warn(`Request timed out, retrying (attempt ${attempt + 1}/${maxRetries})`);
+
+        // Compress context if too large
+        if (action === "compress_context" && this.messages.length > 10) {
+          console.warn(`Context error [${category}], compressing before retry`);
+          await this.compress();
           continue;
         }
-        // server_error or exhausted retries → try fallback
-        break;
+
+        // Retry with jittered backoff
+        if (retryable && attempt < maxRetries - 1) {
+          const delay = jitteredBackoff(attempt);
+          console.warn(`Error [${category}], retrying in ${delay}ms (attempt ${attempt + 1}/${maxRetries})`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+
+        // Abort: non-retryable or exhausted retries
+        if (action === "abort") {
+          throw new Error(`[${category}] ${(err as Error).message}`);
+        }
+        break; // → try fallback
       }
     }
+
     // Fallback transport
-    const fallbackFn = fallback();
-    if (fallbackFn) {
-      try { return await fallbackFn; } catch (err2) { lastErr = err2; }
+    if (lastClassified?.action === "fallback_provider" || !lastClassified?.retryable) {
+      const fallbackFn = fallback();
+      if (fallbackFn) {
+        try { return await fallbackFn; } catch (err2) { lastErr = err2; }
+      }
     }
-    throw new Error(`All providers failed: ${(lastErr as Error)?.message ?? lastErr}`);
-  }
-
-  private classifyApiError(err: unknown): "rate_limit" | "auth_error" | "server_error" | "timeout" | "unknown" {
-    const msg = (err as Error)?.message?.toLowerCase() ?? "";
-    const status = (err as { status?: number })?.status;
-
-    if (status === 401 || status === 403 || msg.includes("invalid api key") || msg.includes("authentication")) {
-      return "auth_error";
-    }
-    if (status === 429 || msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("quota")) {
-      return "rate_limit";
-    }
-    if (status === 500 || status === 502 || status === 503 || msg.includes("server error") || msg.includes("overloaded")) {
-      return "server_error";
-    }
-    if (msg.includes("timeout") || msg.includes("timed out") || msg.includes("aborted") || msg.includes("econnrefused")) {
-      return "timeout";
-    }
-    return "unknown";
+    throw new Error(`All providers failed [${lastClassified?.category ?? "unknown"}]: ${(lastErr as Error)?.message ?? lastErr}`);
   }
 
   addTools(tools: ToolDef[]): void {
@@ -783,49 +997,29 @@ export class Agent {
   async compress(): Promise<string> {
     if (this.messages.length === 0) return "Nothing to compress.";
 
-    // Prune tool outputs before compression
-    const prunedMessages = this.messages.map(m => {
-      if (m.role === "tool" && m.content && m.content.length > 2000) {
-        const head = m.content.slice(0, 800);
-        const tail = m.content.slice(-400);
-        return { ...m, content: `${head}\n\n[... ${m.content.length - 1200} chars pruned ...]\n\n${tail}` };
-      }
-      return m;
-    });
+    const originalCount = this.messages.length;
 
-    const conversationText = prunedMessages.map((m) => {
-      const content = (m.content ?? "").slice(0, 500);
-      const tcSummary = m.toolCalls ? ` [tools: ${m.toolCalls.map(tc => tc.name).join(", ")}]` : "";
-      return `[${m.role}]${tcSummary}: ${content}`;
-    }).join("\n");
+    // Use ContextCompressor with auxiliary client as summarizer
+    const summarizer = async (text: string, instruction?: string) => {
+      return await this.auxiliaryClient.summarize(text, instruction);
+    };
 
-    // Use auxiliary client for summarization (doesn't consume main session quota)
-    const summary = await this.auxiliaryClient.summarize(
-      conversationText,
-      "Produce a structured summary with these sections:\n" +
-      "## Resolved\n- What was accomplished, key answers found, decisions made\n" +
-      "## Pending\n- Unresolved questions, in-progress tasks, next steps\n" +
-      "## Key Facts\n- Technical details, file paths, variable values, API endpoints, error messages\n\n" +
-      "Be terse and information-dense. Preserve exact values (paths, IDs, hashes) verbatim.",
+    this.messages = await this.compressor.compress(
+      this.messages,
+      this.contextWindow,
+      summarizer,
     );
 
-    // Create compressed session in DB
+    // Save compressed session to DB
     if (this.sessionDb) {
       const compressedId = `compressed_${Date.now().toString(36)}`;
       this.sessionDb.createSession(compressedId, `Compressed from ${this.sessionId}`, this.sessionId);
-      this.sessionDb.saveMessage(compressedId, {
-        role: "assistant",
-        content: `[Context Compressed]\n${summary}`,
-      });
+      for (const msg of this.messages) {
+        this.sessionDb.saveMessage(compressedId, msg);
+      }
     }
 
-    // Replace messages with summary
-    const tempCount = this.messages.length;
-    this.messages = [
-      { role: "assistant", content: `[Previous context compressed]\n${summary}` },
-    ];
-
-    return `Compressed ${tempCount} messages into summary (${summary.length} chars).`;
+    return `Compressed ${originalCount} messages into ${this.messages.length} messages.`;
   }
 
   /** Undo last turn: remove last user + assistant pair */
@@ -860,6 +1054,24 @@ export class Agent {
   /** Get current session usage stats */
   getUsage(): { last: { promptTokens: number; completionTokens: number }; total: { promptTokens: number; completionTokens: number; turns: number } } {
     return { last: { ...this.lastUsage }, total: { ...this.totalUsage } };
+  }
+
+  /** Get context window progress for status bar display (Hermes-style) */
+  getContextProgress(): {
+    usedTokens: number;
+    contextWindow: number;
+    percent: number;
+    model: string;
+  } {
+    // Hermes: context usage = last prompt_tokens from API response,
+    // NOT cumulative. prompt_tokens = current context window consumption
+    // because each API call sends the full conversation as the prompt.
+    // Completion tokens are generated by the model and don't consume context space.
+    const usedTokens = this.lastUsage.promptTokens;
+    const percent = this.contextWindow > 0
+      ? Math.min(100, Math.round((usedTokens / this.contextWindow) * 100))
+      : 0;
+    return { usedTokens, contextWindow: this.contextWindow, percent, model: this.model };
   }
 
   /** Get/set active personality */

@@ -6,6 +6,7 @@ import { listBuiltinMcpServersByCategory } from "./index.js";
 import { connectMcpServer } from "../tools/mcp.js";
 import { scanMcpToolList } from "../tools/security.js";
 import { scanMcpCommandForOsv } from "../tools/osv.js";
+import { checkCommandAvailability } from "./resolve.js";
 
 export function mcpManageTool(agent: Agent): ToolDef {
   return {
@@ -113,22 +114,30 @@ function listBuiltin(agent: Agent) {
     connected: boolean;
     envSatisfied: boolean;
     platformOk: boolean;
+    commandAvailable: boolean;
+    installHint: string | null;
     envEnable: string;
     requiredEnv?: string[];
     optionalEnv?: string[];
   }>> = {};
 
   for (const [category, servers] of Object.entries(byCategory)) {
-    result[category] = servers.map((s) => ({
-      name: s.name,
-      description: s.description,
-      connected: connected.has(s.name),
-      envSatisfied: !s.requiredEnv?.some((v) => !process.env[v]),
-      platformOk: !s.platform || s.platform.includes(process.platform),
-      envEnable: s.envEnable,
-      requiredEnv: s.requiredEnv,
-      optionalEnv: s.optionalEnv,
-    }));
+    result[category] = servers.map((s) => {
+      const cmd = s.config.command;
+      const cmdCheck = cmd ? checkCommandAvailability(cmd) : { available: true, installHint: null };
+      return {
+        name: s.name,
+        description: s.description,
+        connected: connected.has(s.name),
+        envSatisfied: !s.requiredEnv?.some((v) => !process.env[v]),
+        platformOk: !s.platform || s.platform.includes(process.platform),
+        commandAvailable: cmdCheck.available,
+        installHint: cmdCheck.installHint,
+        envEnable: s.envEnable,
+        requiredEnv: s.requiredEnv,
+        optionalEnv: s.optionalEnv,
+      };
+    });
   }
 
   return result;
@@ -148,6 +157,17 @@ async function enableBuiltin(agent: Agent, name: string, env?: Record<string, st
     const missing = builtin.requiredEnv.filter((v) => !process.env[v] && !env?.[v]);
     if (missing.length > 0) {
       return { error: `Missing required env: ${missing.join(", ")}. Set these environment variables before enabling.` };
+    }
+  }
+
+  // Pre-flight: check command availability (Hermes-style shutil.which() check)
+  if (builtin.config.command) {
+    const cmdCheck = checkCommandAvailability(builtin.config.command);
+    if (!cmdCheck.available) {
+      const hint = cmdCheck.installHint ?? "Install the required tool and try again.";
+      return {
+        error: `Command "${builtin.config.command}" not found on this system. ${hint}`,
+      };
     }
   }
 
@@ -194,6 +214,17 @@ async function addCustom(
 ) {
   if (!name) return { error: "Missing 'name' parameter for add" };
   if (!command && !url) return { error: "Must provide either 'command' or 'url'" };
+
+  // Pre-flight: check command availability
+  if (command) {
+    const cmdCheck = checkCommandAvailability(command);
+    if (!cmdCheck.available) {
+      const hint = cmdCheck.installHint ?? "Install the required tool and try again.";
+      return {
+        error: `Command "${command}" not found on this system. ${hint}`,
+      };
+    }
+  }
 
   const config: McpServerConfig = {};
   if (url) {
