@@ -40,6 +40,12 @@ import { KanbanBoard, kanbanTool } from "./kanban.js";
 import { getModelMetadata, getContextWindow } from "./tools/model-metadata.js";
 import { ContextCompressor } from "./context/compressor.js";
 import { GoalManager } from "./goals/index.js";
+import { HookRegistry } from "./hooks.js";
+import { SkinManager } from "./skin.js";
+import { SnapshotManager } from "./snapshot.js";
+import { PluginSystem } from "./plugin-system.js";
+import { InsightsEngine } from "./tools/insights.js";
+import { BackgroundTaskManager } from "./bg-tasks.js";
 
 export class Agent {
   private transport: Transport;
@@ -50,6 +56,16 @@ export class Agent {
   private kanban: KanbanBoard;
   private compressor: ContextCompressor;
   private goalManager: GoalManager;
+  /** Hook registry for pre/post tool calls, session events, errors (Task 3) */
+  readonly hooks: HookRegistry;
+  /** Skin/Theme manager (Task 6) */
+  readonly skin: SkinManager;
+  /** Snapshot manager (Task 8) */
+  readonly snapshots: SnapshotManager;
+  /** Plugin system (Tier 1) */
+  readonly pluginSystem: PluginSystem;
+  /** Background task manager (Tier 3) */
+  readonly bgTasks: BackgroundTaskManager;
   /** Agent behavior config (Phase 2) */
   private timeoutMs: number;
   private apiMaxRetries: number;
@@ -61,7 +77,15 @@ export class Agent {
   private toolOutputMaxLines: number;
   private toolOutputMaxLineLength: number;
   private fileReadMaxChars: number;
+  /** Tool progress display mode (Task 5) */
+  progressMode: "off" | "new" | "all" | "verbose";
+  private lastToolName: string;
+  /** Status bar display density */
+  statusBarMode: "compact" | "normal" | "detailed";
+  /** Voice mode configuration */
+  voiceMode: "off" | "tts" | "stt" | "on";
   private messages: Message[] = [];
+  private branches = new Map<string, { id: string; messages: Message[] }>();
   private toolRegistry: ToolRegistry;
   private maxTurns: number;
   private toolCallCount = 0;
@@ -126,6 +150,14 @@ export class Agent {
     this.compressor = new ContextCompressor(config.compression);
     // Goal manager for autonomous multi-turn work (Ralph Loop)
     this.goalManager = new GoalManager();
+    // Hook registry for user-registered event handlers
+    this.hooks = new HookRegistry();
+    this.skin = new SkinManager();
+    this.snapshots = new SnapshotManager();
+    this.pluginSystem = new PluginSystem();
+    // Inject registries so plugins can register tools/hooks
+    this.pluginSystem.injectRegistries(this.toolRegistry, this.hooks);
+    this.bgTasks = new BackgroundTaskManager();
     // Agent behavior config (Phase 2)
     this.timeoutMs = config.behavior?.timeoutMs ?? 0;
     this.apiMaxRetries = config.behavior?.apiMaxRetries ?? 3;
@@ -137,6 +169,10 @@ export class Agent {
     this.toolOutputMaxLines = config.toolOutput?.maxLines ?? 2000;
     this.toolOutputMaxLineLength = config.toolOutput?.maxLineLength ?? 2000;
     this.fileReadMaxChars = config.fileRead?.maxChars ?? 100_000;
+    this.progressMode = "new";
+    this.lastToolName = "";
+    this.statusBarMode = "normal";
+    this.voiceMode = "off";
     this.toolRegistry = new ToolRegistry(config.tools ?? []);
     this.maxTurns = config.maxTurns ?? 20;
     this.basePrompt = config.systemPrompt ?? "You are Skeleton, a reverse engineering AI assistant.";
@@ -357,6 +393,9 @@ export class Agent {
   }
 
   private async _run(userInput: string): Promise<string> {
+    // ── Hook: on_session_start ──
+    await this.hooks.emit("on_session_start");
+
     // Resolve context references (@file:, @url:, @git:, @diff:)
     let resolvedInput = userInput;
     if (/@(file|url|git|diff):/.test(userInput)) {
@@ -434,6 +473,9 @@ export class Agent {
     // If this session has an active goal, judge whether it's done.
     // If not, auto-feed a continuation prompt back into run().
     result = await this.maybeRunGoalLoop(result);
+
+    // ── Hook: on_session_end ──
+    await this.hooks.emit("on_session_end");
 
     return result;
   }
@@ -662,6 +704,22 @@ export class Agent {
       this.projectContext.notifyDirectoryVisit(String(tc.arguments.cwd));
     }
 
+    // ── Hook: pre_tool_call (allows blocking or arg modification) ──
+    const preResult = await this.hooks.emit("pre_tool_call", {
+      toolName: tc.name,
+      args: tc.arguments as Record<string, unknown>,
+    });
+    if (preResult.blocked) {
+      const duration = (Date.now() - startTime) / 1000;
+      const blockedStr = `BLOCKED_BY_HOOK: ${preResult.reason ?? "pre_tool_call hook blocked execution"}`;
+      this.onToolComplete?.({ name: tc.name, args: tc.arguments, duration, isError: true, resultPreview: blockedStr.slice(0, 200) });
+      return { tc, resultStr: blockedStr, duration, isError: true };
+    }
+    // Apply arg modifications from hooks
+    if (preResult.modifiedArgs) {
+      tc = { ...tc, arguments: { ...tc.arguments, ...preResult.modifiedArgs } };
+    }
+
     // Guardrail check
     const guardCheck = this.guardrail.check(tc.name, tc.arguments);
     let result: unknown;
@@ -688,6 +746,12 @@ export class Agent {
           result = `Error: ${(err as Error).message}`;
           this.guardrail.record(tc.name, tc.arguments, "error");
           isError = true;
+          // ── Hook: on_error (tool execution failure) ──
+          await this.hooks.emit("on_error", {
+            toolName: tc.name,
+            args: tc.arguments as Record<string, unknown>,
+            error: err as Error,
+          });
         }
       }
     }
@@ -711,6 +775,14 @@ export class Agent {
       duration,
       isError,
       resultPreview: finalResultStr.slice(0, 200),
+    });
+
+    // ── Hook: post_tool_call (allows context injection, logging) ──
+    await this.hooks.emit("post_tool_call", {
+      toolName: tc.name,
+      args: tc.arguments as Record<string, unknown>,
+      result: finalResultStr.slice(0, 500),
+      durationMs: duration * 1000,
     });
 
     return { tc, resultStr: finalResultStr, duration, isError };
@@ -806,22 +878,46 @@ export class Agent {
   }
 
   private async callWithFallback(systemPrompt: string): Promise<NormalizedResponse> {
-    return this.retryWithFallback(
-      () => this.transport.send(systemPrompt, this.messages, this.tools),
-      () => this.fallbackTransport?.send(systemPrompt, this.messages, this.tools),
+    // ── Hook: pre_llm_call (allows context injection before LLM call) ──
+    const preResult = await this.hooks.emit("pre_llm_call");
+    let prompt = systemPrompt;
+    if (preResult.contextInjection) {
+      prompt += "\n" + preResult.contextInjection;
+    }
+
+    const response = await this.retryWithFallback(
+      () => this.transport.send(prompt, this.messages, this.tools),
+      () => this.fallbackTransport?.send(prompt, this.messages, this.tools),
       this.apiMaxRetries,
     );
+
+    // ── Hook: post_llm_call ──
+    await this.hooks.emit("post_llm_call", { result: response });
+
+    return response;
   }
 
   private async streamWithFallback(
     systemPrompt: string,
     onToken: (token: string) => void,
   ): Promise<NormalizedResponse> {
-    return this.retryWithFallback(
-      () => this.transport.sendStream(systemPrompt, this.messages, onToken, this.tools),
-      () => this.fallbackTransport?.sendStream(systemPrompt, this.messages, onToken, this.tools),
+    // ── Hook: pre_llm_call (streaming path) ──
+    const preResult = await this.hooks.emit("pre_llm_call");
+    let prompt = systemPrompt;
+    if (preResult.contextInjection) {
+      prompt += "\n" + preResult.contextInjection;
+    }
+
+    const response = await this.retryWithFallback(
+      () => this.transport.sendStream(prompt, this.messages, onToken, this.tools),
+      () => this.fallbackTransport?.sendStream(prompt, this.messages, onToken, this.tools),
       this.apiMaxRetries,
     );
+
+    // ── Hook: post_llm_call (streaming path) ──
+    await this.hooks.emit("post_llm_call", { result: response });
+
+    return response;
   }
 
   private async retryWithFallback(
@@ -993,6 +1089,45 @@ export class Agent {
   getHistory(): Message[] { return [...this.messages]; }
   reset(): void { this.messages = []; }
 
+  /** Load messages from an external source (e.g., snapshot restore) */
+  loadMessages(msgs: Array<{ role: string; content: string }>): void {
+    this.messages = msgs.map(m => ({ role: m.role as Message["role"], content: m.content }));
+  }
+
+  /** Branch the current session: snapshot messages into a new session ID */
+  branch(name: string): string {
+    const branchId = `branch_${name}_${Date.now().toString(36)}`;
+    // Save current messages as the branched session
+    if (this.sessionDb) {
+      this.sessionDb.createSession(branchId, `Branch: ${name}`, this.sessionId);
+      for (const msg of this.messages) {
+        this.sessionDb.saveMessage(branchId, msg);
+      }
+    }
+    // Store branch reference for later resume
+    this.branches.set(name, { id: branchId, messages: [...this.messages] });
+    return branchId;
+  }
+
+  /** Resume a previously branched session by name */
+  resumeBranch(name: string): boolean {
+    const branch = this.branches.get(name);
+    if (!branch) return false;
+    // Save current state before switching
+    this.messages = [...branch.messages];
+    return true;
+  }
+
+  /** List all branch names */
+  listBranches(): string[] {
+    return [...this.branches.keys()];
+  }
+
+  /** Delete a branch */
+  deleteBranch(name: string): boolean {
+    return this.branches.delete(name);
+  }
+
   /** Compress context: summarize conversation into a condensed form */
   async compress(): Promise<string> {
     if (this.messages.length === 0) return "Nothing to compress.";
@@ -1074,8 +1209,27 @@ export class Agent {
     return { usedTokens, contextWindow: this.contextWindow, percent, model: this.model };
   }
 
+  /** Cycle tool progress display mode: off → new → all → verbose → off */
+  cycleProgressMode(): "off" | "new" | "all" | "verbose" {
+    const order: Array<"off" | "new" | "all" | "verbose"> = ["off", "new", "all", "verbose"];
+    const idx = order.indexOf(this.progressMode);
+    this.progressMode = order[(idx + 1) % order.length];
+    return this.progressMode;
+  }
+
+  /** Set tool progress display mode directly */
+  setProgressMode(mode: "off" | "new" | "all" | "verbose"): void {
+    this.progressMode = mode;
+  }
+
   /** Get/set active personality */
   getPersonality(): PersonalityStore { return this.personality; }
+
+  /** Get InsightsEngine for usage analytics */
+  getInsightsEngine(): InsightsEngine | null {
+    if (!this.sessionDb) return null;
+    return new InsightsEngine(this.sessionDb);
+  }
 
   async close(): Promise<void> {
     if (this.memory) this.memory.close();

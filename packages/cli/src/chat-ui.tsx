@@ -15,9 +15,13 @@
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import { render, Box, Text, useInput, useApp } from "ink";
 import chalk from "chalk";
-import type { Agent, MemoryStore, UserProfile, SessionDB, CronStore } from "@skeleton/core";
-import { formatToolCompletion, formatToolInProgress } from "@skeleton/core";
+import type { Agent, MemoryStore, UserProfile, SessionDB, CronStore, CommandContext } from "@skeleton/core";
+import {
+  formatToolCompletion, formatToolInProgress,
+  processCommandAsync,
+} from "@skeleton/core";
 import { formatTokenCount, buildContextBar, contextBarColor } from "./theme.js";
+import { InkAdapter } from "./output-adapter.js";
 
 interface ChatUIProps {
   agent: Agent;
@@ -44,6 +48,7 @@ export function ChatUI({
   const [streamText, setStreamText] = useState("");
   const [thinking, setThinking] = useState(false);
   const [ctxProgress, setCtxProgress] = useState<{ usedTokens: number; contextWindow: number; percent: number } | null>(null);
+  const lastToolNameRef = useRef("");
   const maxLines = 500;
   const isProcessing = useRef(false);
 
@@ -61,169 +66,56 @@ export function ChatUI({
     });
   }, []);
 
-  // Slash command handler
-  const handleSlashCommand = useCallback((cmd: string): boolean => {
-    const parts = cmd.split(/\s+/);
-    const base = parts[0];
-
-    switch (base) {
-      case "/quit":
-      case "/exit":
-        onQuit().then(() => exit());
-        return true;
-
-      case "/new":
-        agent.reset();
-        addLine(chalk.green("✓ New session."));
-        addLine(chalk.gray("─".repeat(60)));
-        return true;
-
-      case "/reset":
-        agent.reset();
-        addLine(chalk.gray("✓ Conversation reset."));
-        return true;
-
-      case "/history": {
-        const history = agent.getHistory();
-        if (history.length === 0) {
-          addLine(chalk.gray("  (empty)"));
-        } else {
-          for (const msg of history) {
-            const rc: Record<string, { glyph: string; style: typeof chalk.green }> = {
-              user: { glyph: "❯", style: chalk.green },
-              assistant: { glyph: "◆", style: chalk.magenta },
-              tool: { glyph: "┊", style: chalk.gray },
-            };
-            const r = rc[msg.role] ?? { glyph: "·", style: chalk.gray };
-            const limit = msg.role === "tool" ? 100 : 200;
-            addLine(`  ${r.style(r.glyph)} ${(msg.content ?? "").slice(0, limit)}`);
-          }
-        }
-        return true;
+  /** Build a progressMode-aware onToolComplete callback */
+  const buildToolCompleteHandler = useCallback(() => {
+    return (info: { name: string; args: Record<string, unknown>; duration: number; isError: boolean; resultPreview: string }) => {
+      const mode = agent.progressMode;
+      // "off": no tool output at all
+      if (mode === "off") {
+        setCtxProgress(agent.getContextProgress());
+        return;
       }
-
-      case "/model":
-        addLine(chalk.gray(`  ${config.llm.protocol} | ${config.llm.model}`));
-        addLine(chalk.gray(`  Base: ${config.llm.baseUrl}`));
-        return true;
-
-      case "/memory": {
-        const all = memory.list();
-        if (all.length === 0) {
-          addLine(chalk.gray("  No memories yet."));
-        } else {
-          for (const m of all) {
-            addLine(`  ${chalk.yellow(`[${m.category}]`)} ${m.content.slice(0, 120)}`);
-          }
-        }
-        return true;
+      // "new": skip if same tool as last time
+      if (mode === "new" && info.name === lastToolNameRef.current) {
+        lastToolNameRef.current = info.name;
+        setCtxProgress(agent.getContextProgress());
+        return;
       }
+      lastToolNameRef.current = info.name;
 
-      case "/remember":
-        if (parts[1]) {
-          memory.add(parts.slice(1).join(" "), "user", "manual");
-          addLine(chalk.green("✓ Saved to memory."));
-        }
-        return true;
+      const line = formatToolCompletion(info.name, info.args, info.duration, {
+        isError: info.isError, useColor: true,
+      });
+      addLine("  " + line);
 
-      case "/forget":
-        if (parts[1]) {
-          const removed = memory.remove(parts.slice(1).join(" "));
-          addLine(chalk.gray(`✓ Removed ${removed} memory(ies).`));
+      // "verbose": also show args and result preview
+      if (mode === "verbose") {
+        addLine(chalk.gray(`    args: ${JSON.stringify(info.args).slice(0, 300)}`));
+        if (info.resultPreview) {
+          addLine(chalk.gray(`    result: ${info.resultPreview}`));
         }
-        return true;
-
-      case "/search":
-        if (parts[1]) {
-          const results = sessionDb.search(parts.slice(1).join(" "));
-          if (results.length === 0) {
-            addLine(chalk.gray("  No results."));
-          } else {
-            for (const r of results) {
-              addLine(`  ${chalk.gray(`[${r.role}]`)} ${r.content.slice(0, 150)}`);
-            }
-          }
-        }
-        return true;
-
-      case "/tools": {
-        const registry = agent.getToolRegistry();
-        const toolList = registry.list();
-        if (toolList.length === 0) {
-          addLine(chalk.gray("  No tools registered."));
-        } else {
-          for (const t of toolList) {
-            addLine(`  ${chalk.cyan(t.name)} — ${t.description.slice(0, 80)}`);
-          }
-        }
-        return true;
       }
+      setCtxProgress(agent.getContextProgress());
+    };
+  }, [agent, addLine]);
 
-      case "/usage": {
-        const usage = agent.getUsage();
-        const ctx = agent.getContextProgress();
-        addLine(chalk.cyan("  Last turn:"));
-        addLine(`    Prompt: ${usage.last.promptTokens} | Completion: ${usage.last.completionTokens}`);
-        addLine(chalk.cyan("  Session total:"));
-        addLine(`    Prompt: ${usage.total.promptTokens} | Completion: ${usage.total.completionTokens} | Turns: ${usage.total.turns}`);
-        addLine(chalk.cyan("  Context window:"));
-        addLine(`    ${formatTokenCount(ctx.usedTokens)}/${formatTokenCount(ctx.contextWindow)} ${buildContextBar(ctx.percent, 12)} ${ctx.percent}%`);
-        return true;
-      }
+  // Build the command context for the shared processor
+  const cmdCtx = useCallback((): CommandContext => ({
+    agent,
+    memory,
+    sessionDb,
+    cronStore,
+    config,
+    userProfile,
+  }), [agent, memory, sessionDb, cronStore, config, userProfile]);
 
-      case "/undo": {
-        const ok = agent.undoLastTurn();
-        addLine(ok ? chalk.green("  ✓ Last turn undone.") : chalk.gray("  Nothing to undo."));
-        return true;
-      }
-
-      case "/compress":
-        // Async — fire and show result when done
-        agent.compress().then(msg => addLine(chalk.green(`  ✓ ${msg}`))).catch(err => addLine(chalk.red(`  ✗ ${err.message}`)));
-        addLine(chalk.gray("  Compressing..."));
-        return true;
-
-      case "/goal": {
-        const sub = parts[1];
-        if (!sub || sub === "status") {
-          const goal = agent.getGoal();
-          if (!goal) {
-            addLine(chalk.gray("  No active goal. Usage: /goal <text> to set one."));
-          } else {
-            addLine(chalk.cyan(`  Goal: ${goal.goal}`));
-            addLine(chalk.gray(`  Status: ${goal.status} | Turns: ${goal.turnsUsed}/${goal.maxTurns}`));
-            if (goal.lastVerdict) {
-              addLine(chalk.gray(`  Last verdict: ${goal.lastVerdict} — ${goal.lastReason ?? ""}`));
-            }
-            if (goal.pausedReason) {
-              addLine(chalk.yellow(`  Paused: ${goal.pausedReason}`));
-            }
-          }
-        } else if (sub === "pause") {
-          agent.pauseGoal("user paused");
-          addLine(chalk.yellow("  ⏸ Goal paused."));
-        } else if (sub === "resume") {
-          const ok = agent.resumeGoal();
-          addLine(ok ? chalk.green("  ▶ Goal resumed.") : chalk.gray("  No paused goal to resume."));
-        } else if (sub === "clear") {
-          agent.clearGoal();
-          addLine(chalk.gray("  ✓ Goal cleared."));
-        } else {
-          // Set new goal
-          const goalText = parts.slice(1).join(" ");
-          agent.setGoal(goalText);
-          addLine(chalk.green(`  ✓ Goal set: ${goalText}`));
-          addLine(chalk.gray("  Agent will continue working toward this goal across turns."));
-          addLine(chalk.gray("  Use /goal status, /goal pause, /goal resume, or /goal clear."));
-        }
-        return true;
-      }
-
-      default:
-        addLine(chalk.yellow(`  Unknown: ${cmd}`));
-        return true;
-    }
-  }, [agent, memory, sessionDb, config, addLine, exit, onQuit]);
+  // Build ink output adapter
+  const inkAdapter = useCallback((): InkAdapter => {
+    const streamCb = (token: string) => {
+      // no-op placeholder — real streaming handled in handleSubmit
+    };
+    return new InkAdapter(addLine, addLines, setOutput, setInput, onQuit, agent, streamCb);
+  }, [agent, addLine, addLines, onQuit]);
 
   // Main submit handler
   const handleSubmit = useCallback(async (text: string) => {
@@ -231,8 +123,61 @@ export function ChatUI({
     const trimmed = text.trim();
 
     if (trimmed.startsWith("/")) {
-      handleSlashCommand(trimmed);
       setInput("");
+
+      // Use shared command processor
+      const adapter = inkAdapter();
+      const ctx = cmdCtx();
+
+      // For skill commands, use the full streaming UI path
+      const parts = trimmed.split(/\s+/);
+      const skillName = parts[0].replace(/^\/+/, "");
+      const skillReg = agent.getSkillRegistry();
+      const skill = skillReg?.get(skillName);
+      if (skill?.userInvocable) {
+        // Skill slash — full streaming UI (same as normal chat)
+        isProcessing.current = true;
+        addLine(chalk.cyan(`  ⚡ Skill: ${skill.name}`));
+        setStreaming(true);
+        setThinking(true);
+        setStreamText("");
+
+        agent.onToolCall = (name, args) => { setCtxProgress(agent.getContextProgress()); };
+        agent.onToolComplete = buildToolCompleteHandler();
+        agent.onToolResult = () => {};
+
+        let firstToken = true;
+        let accumulated = "";
+        try {
+          const result = await agent.runStream(trimmed, (token) => {
+            const safeToken = String(token ?? "");
+            if (firstToken) { setThinking(false); firstToken = false; }
+            accumulated += safeToken;
+            setStreamText(accumulated);
+          });
+          if (firstToken) accumulated = result ?? "";
+          const headerLine = chalk.magenta("◆") + chalk.gray(" Skeleton");
+          addLines([headerLine, accumulated, chalk.gray("─".repeat(60))]);
+        } catch (err) {
+          addLine(chalk.red(`  ✗ ${(err as Error).message}`));
+        } finally {
+          setStreaming(false);
+          setStreamText("");
+          setThinking(false);
+          isProcessing.current = false;
+          setCtxProgress(agent.getContextProgress());
+        }
+        return;
+      }
+
+      // Regular slash commands — delegate to shared processor
+      await processCommandAsync(trimmed, ctx, adapter);
+
+      // Check if command was quit
+      const resolved = (await import("@skeleton/core")).resolveCommand(parts[0]);
+      if (resolved?.name === "quit" || resolved?.name === "exit") {
+        exit();
+      }
       return;
     }
 
@@ -243,22 +188,12 @@ export function ChatUI({
     setThinking(true);
     setStreamText("");
 
-    // Wire tool call callbacks — use new pretty output format (Hermes-style)
+    // Wire tool call callbacks — progressMode-aware (Task 5)
     agent.onToolCall = (name, args) => {
-      // Show in-progress indicator (will be replaced by completion line)
       const preview = formatToolInProgress(name, args);
       setCtxProgress(agent.getContextProgress());
     };
-    agent.onToolComplete = (info) => {
-      // Single pretty-formatted line: ┊ 🔍 search    "query"  0.8s
-      const line = formatToolCompletion(info.name, info.args, info.duration, {
-        isError: info.isError,
-        useColor: true,
-      });
-      addLine("  " + line);
-      setCtxProgress(agent.getContextProgress());
-    };
-    // Keep legacy onToolResult as a no-op (onToolComplete supersedes it)
+    agent.onToolComplete = buildToolCompleteHandler();
     agent.onToolResult = () => {};
 
     let firstToken = true;
@@ -292,7 +227,7 @@ export function ChatUI({
       isProcessing.current = false;
       setCtxProgress(agent.getContextProgress());
     }
-  }, [agent, addLine, addLines, handleSlashCommand]);
+  }, [agent, addLine, addLines, cmdCtx, inkAdapter]);
 
   // Key input handler
   useInput((ch, key) => {
@@ -338,28 +273,43 @@ export function ChatUI({
         )}
       </Box>
 
-      {/* Status bar — persistent info line with context progress (Hermes-style) */}
+      {/* Status bar — density controlled by agent.statusBarMode */}
       <Box borderStyle="single" borderColor="gray" paddingLeft={1} paddingRight={1}>
         <Text color="magenta">◆</Text>
         <Text> </Text>
         <Text color="cyan">{shortModel}</Text>
-        <Text color="gray"> │ </Text>
-        <Text color="green">T:{toolCount}</Text>
-        <Text color="gray"> │ </Text>
-        <Text color="yellow">M:{mcpCount}</Text>
-        {ctxProgress && (
+        {agent.statusBarMode !== "compact" && (
           <>
             <Text color="gray"> │ </Text>
-            <Text color={contextBarColor(ctxProgress.percent)}>
-              {buildContextBar(ctxProgress.percent, 8)}
-            </Text>
-            <Text> </Text>
-            <Text color="gray">
-              {formatTokenCount(ctxProgress.usedTokens)}/{formatTokenCount(ctxProgress.contextWindow)}
-            </Text>
-            <Text color={contextBarColor(ctxProgress.percent)}>
-              {" "}{ctxProgress.percent}%
-            </Text>
+            <Text color="green">T:{toolCount}</Text>
+            <Text color="gray"> │ </Text>
+            <Text color="yellow">M:{mcpCount}</Text>
+            {ctxProgress && (
+              <>
+                <Text color="gray"> │ </Text>
+                <Text color={contextBarColor(ctxProgress.percent)}>
+                  {buildContextBar(ctxProgress.percent, 8)}
+                </Text>
+                <Text> </Text>
+                <Text color="gray">
+                  {formatTokenCount(ctxProgress.usedTokens)}/{formatTokenCount(ctxProgress.contextWindow)}
+                </Text>
+                <Text color={contextBarColor(ctxProgress.percent)}>
+                  {" "}{ctxProgress.percent}%
+                </Text>
+              </>
+            )}
+          </>
+        )}
+        {agent.statusBarMode === "detailed" && (
+          <>
+            <Text color="gray"> │ </Text>
+            <Text color="blue">P:{agent.getPersonality().getActiveName()}</Text>
+            <Text color="gray"> │ </Text>
+            <Text color="magenta">S:{agent.skin.getActiveName()}</Text>
+            {ctxProgress && (
+              <Text color="gray"> │ {formatTokenCount(ctxProgress.usedTokens)}</Text>
+            )}
           </>
         )}
         {streaming && <Text color="gray"> │ </Text>}

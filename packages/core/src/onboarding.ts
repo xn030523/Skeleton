@@ -25,13 +25,19 @@ export interface OnboardingState {
   completedAt?: string;
 }
 
+const VALID_PROVIDERS = [
+  "openai", "anthropic", "deepseek", "openrouter", "google", "ollama",
+  "alibaba", "minimax", "xai", "stepfun", "huggingface", "nvidia",
+  "azure", "kimi", "xiaomi", "nous", "arcee", "gmi",
+];
+
 const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: "provider",
     title: "Select Provider",
-    prompt: "Choose a provider (openai / anthropic / google / ollama):",
-    validate: (v) => ["openai", "anthropic", "google", "ollama"].includes(v.trim().toLowerCase()),
-    errorMessage: "Invalid provider. Choose: openai, anthropic, google, ollama",
+    prompt: `Choose a provider (${VALID_PROVIDERS.slice(0, 8).join(" / ")} / ...):`,
+    validate: (v) => VALID_PROVIDERS.includes(v.trim().toLowerCase()) || v.trim().startsWith("http"),
+    errorMessage: `Invalid provider. Popular choices: ${VALID_PROVIDERS.slice(0, 6).join(", ")}`,
   },
   {
     id: "apikey",

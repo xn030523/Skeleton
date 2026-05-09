@@ -158,6 +158,17 @@ export {
   DEFAULT_MAX_TURNS as GOAL_DEFAULT_MAX_TURNS,
 } from "./goals/index.js";
 export type { GoalState, GoalStatus } from "./goals/index.js";
+export {
+  COMMAND_REGISTRY,
+  resolveCommand,
+  listAllCommandNames,
+  commandsByCategory,
+  commandHelpLine,
+  getSubcommands,
+} from "./commands/registry.js";
+export type { CommandDef, CommandCategory } from "./commands/registry.js";
+export { processCommandAsync } from "./commands/processor.js";
+export type { CommandAction, CommandContext, OutputAdapter } from "./commands/processor.js";
 export { HolographicMemory } from "./memory/holographic.js";
 export type { HRRVector } from "./memory/holographic.js";
 export type { MemoryPlugin } from "./memory/plugins.js";
@@ -186,3 +197,18 @@ export { SkillSync } from "./skills/sync.js";
 export type { SyncManifest, SyncStatus, ConflictResolution } from "./skills/sync.js";
 export { SkillsGuard } from "./skills/guard.js";
 export type { ScanResult, RiskLevel, PermissionCheck } from "./skills/guard.js";
+export { SkinManager } from "./skin.js";
+export type { SkinDef } from "./skin.js";
+export { SnapshotManager } from "./snapshot.js";
+export type { SnapshotMeta } from "./snapshot.js";
+export { copyToClipboard, pasteFromClipboard, isClipboardAvailable } from "./clipboard.js";
+export { checkForUpdate, applyUpdate, getCurrentVersion, getLastUpdateCheck } from "./update.js";
+export type { UpdateInfo } from "./update.js";
+export { generateDebugReport, formatDebugReport, saveDebugReport } from "./debug-report.js";
+export type { DebugReport } from "./debug-report.js";
+export { checkPackageSecurity, formatVulnerabilityReport } from "./osv-security.js";
+export type { VulnerabilityReport } from "./osv-security.js";
+export { BackgroundTaskManager } from "./bg-tasks.js";
+export type { BgTask } from "./bg-tasks.js";
+export { getAgentStatus, formatAgentStatus } from "./agent-status.js";
+export type { AgentStatusReport } from "./agent-status.js";

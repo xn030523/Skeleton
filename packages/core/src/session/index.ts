@@ -241,6 +241,65 @@ export class SessionDB {
       .all(limit) as Array<{ id: string; title: string | null; createdAt: string; messageCount: number }>;
   }
 
+  /** List all sessions with metadata (for Insights engine) */
+  listSessions(): Array<{
+    id: string;
+    title: string | null;
+    createdAt: number;
+    tokenCount: number;
+    model: string | null;
+    parentSessionId: string | null;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT s.id, s.title, s.created_at, s.parent_session_id,
+                COUNT(m.id) as message_count
+         FROM sessions s
+         LEFT JOIN messages m ON m.session_id = s.id
+         GROUP BY s.id
+         ORDER BY s.created_at DESC`,
+      )
+      .all() as Array<{
+        id: string;
+        title: string | null;
+        created_at: string;
+        parent_session_id: string | null;
+        message_count: number;
+      }>;
+
+    return rows.map(r => ({
+      id: r.id,
+      title: r.title,
+      createdAt: new Date(r.created_at || 0).getTime(),
+      tokenCount: r.message_count * 100, // rough estimate
+      model: null,
+      parentSessionId: r.parent_session_id,
+    }));
+  }
+
+  /** Get messages for a specific session (for Insights tool usage tracking) */
+  getSessionMessages(sessionId: string): Array<{
+    role: string;
+    content: string;
+    toolCalls?: Array<{ name: string }>;
+  }> {
+    const rows = this.db
+      .prepare("SELECT role, content, tool_calls_json FROM messages WHERE session_id = ? ORDER BY id ASC")
+      .all(sessionId) as Array<{
+        role: string;
+        content: string;
+        tool_calls_json: string | null;
+      }>;
+
+    return rows.map(r => ({
+      role: r.role,
+      content: r.content,
+      toolCalls: r.tool_calls_json
+        ? (() => { try { return JSON.parse(r.tool_calls_json); } catch { return undefined; } })()
+        : undefined,
+    }));
+  }
+
   close(): void {
     this.db.close();
   }
