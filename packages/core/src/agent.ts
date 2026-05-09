@@ -155,8 +155,6 @@ export class Agent {
     this.skin = new SkinManager();
     this.snapshots = new SnapshotManager();
     this.pluginSystem = new PluginSystem();
-    // Inject registries so plugins can register tools/hooks
-    this.pluginSystem.injectRegistries(this.toolRegistry, this.hooks);
     this.bgTasks = new BackgroundTaskManager();
     // Agent behavior config (Phase 2)
     this.timeoutMs = config.behavior?.timeoutMs ?? 0;
@@ -174,6 +172,8 @@ export class Agent {
     this.statusBarMode = "normal";
     this.voiceMode = "off";
     this.toolRegistry = new ToolRegistry(config.tools ?? []);
+    // Inject registries so plugins can register tools/hooks (must be after toolRegistry init)
+    this.pluginSystem.injectRegistries(this.toolRegistry, this.hooks);
     this.maxTurns = config.maxTurns ?? 20;
     this.basePrompt = config.systemPrompt ?? "You are Skeleton, a reverse engineering AI assistant.";
     this.model = config.llm.model;
@@ -455,6 +455,11 @@ export class Agent {
 
     let result = "";
     for (let turn = 0; turn < this.maxTurns; turn++) {
+      // Mid-turn compression check: tool output can bloat context past the limit
+      if (turn > 0 && this.compressor.shouldCompress(this.messages, this.contextWindow)) {
+        console.log(`Mid-turn auto-compress at turn ${turn} (${this.messages.length} messages)`);
+        await this.compress();
+      }
       const response = await this.callWithFallback(systemPrompt);
       if (!(await this.handleResponse(response))) {
         result = response.content ?? "";
@@ -556,6 +561,12 @@ export class Agent {
   }
 
   async runStream(userInput: string, onToken: (token: string) => void): Promise<string> {
+    // Pre-turn compression check (same as _run)
+    if (this.compressor.shouldCompress(this.messages, this.contextWindow)) {
+      console.log(`Auto-compressing ${this.messages.length} messages before stream turn`);
+      await this.compress();
+    }
+
     this.messages.push({ role: "user", content: userInput });
     this.toolCallCount = 0;
     if (this.sessionDb) {
@@ -565,6 +576,11 @@ export class Agent {
 
     let result = "";
     for (let turn = 0; turn < this.maxTurns; turn++) {
+      // Mid-turn compression check for streaming too
+      if (turn > 0 && this.compressor.shouldCompress(this.messages, this.contextWindow)) {
+        console.log(`Mid-turn auto-compress at stream turn ${turn} (${this.messages.length} messages)`);
+        await this.compress();
+      }
       const response = await this.streamWithFallback(systemPrompt, onToken);
       if (!(await this.handleResponse(response))) {
         result = response.content ?? "";
@@ -858,12 +874,20 @@ export class Agent {
       "key", "algorithm", "decrypt", "encrypt", "hash",
       "struct", "protocol", "format", "header",
     ];
+    const negations = [
+      "not vulnerable", "no vulnerability", "isn't vulnerable", "no exploit",
+      "no exploit found", "not an exploit", "not exploitable", "no offset",
+      "no address", "no key found", "no hash found", "no function",
+      "not a function", "no protocol", "no header", "no struct",
+      "不存在", "没有漏洞", "未发现", "无偏移", "无地址", "无密钥",
+    ];
     const lines = content.split("\n").filter((l) => l.trim().length > 10);
     for (const line of lines) {
       const lower = line.toLowerCase();
       if (keywords.some((kw) => lower.includes(kw))) {
-          this.memory.add(line.trim(), "finding", "auto");
-        }
+        if (negations.some((neg) => lower.includes(neg))) continue;
+        this.memory.add(line.trim(), "finding", "auto");
+      }
     }
   }
 
@@ -1231,12 +1255,15 @@ export class Agent {
     return new InsightsEngine(this.sessionDb);
   }
 
-  async close(): Promise<void> {
+  async close(options?: { closeMcp?: boolean }): Promise<void> {
     if (this.memory) this.memory.close();
-    // Close MCP clients
-    for (const client of this.mcpClients) {
-      if (client && typeof (client as { close?: () => void }).close === "function") {
-        (client as { close: () => void }).close();
+    const shouldCloseMcp = options?.closeMcp !== false;
+    // Close MCP clients only when the agent owns them (not shared/borrowed)
+    if (shouldCloseMcp) {
+      for (const client of this.mcpClients) {
+        if (client && typeof (client as { close?: () => void }).close === "function") {
+          (client as { close: () => void }).close();
+        }
       }
     }
     this.mcpClients = [];

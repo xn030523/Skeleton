@@ -1,45 +1,6 @@
 import type { ToolDef } from "../types.js";
 import { isUrlSafe } from "./security.js";
-
-type CdpConnection = { ws: string; id: number };
-type PageState = { url: string; title: string };
-
-const cdpConnections = new Map<string, CdpConnection>();
-let cdpPageInfo: PageState | null = null;
-
-async function cdpSend(wsUrl: string, method: string, params: Record<string, unknown> = {}): Promise<unknown> {
-  const id = (cdpConnections.get(wsUrl)?.id ?? 0) + 1;
-  cdpConnections.set(wsUrl, { ws: wsUrl, id });
-
-  const { WebSocket } = await import("ws");
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(wsUrl);
-    const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error("CDP timeout"));
-    }, 15000);
-
-    ws.once("open", () => {
-      ws.send(JSON.stringify({ id, method, params }));
-    });
-
-    ws.once("message", (data: Buffer) => {
-      clearTimeout(timeout);
-      ws.close();
-      try {
-        const msg = JSON.parse(data.toString());
-        resolve(msg.result ?? msg);
-      } catch {
-        reject(new Error("Invalid CDP response"));
-      }
-    });
-
-    ws.once("error", (err: Error) => {
-      clearTimeout(timeout);
-      reject(err);
-    });
-  });
-}
+import { cdpSupervisor } from "./browser-supervisor.js";
 
 type PlaywrightModule = typeof import("playwright");
 type Browser = Awaited<ReturnType<PlaywrightModule["chromium"]["launch"]>>;
@@ -85,14 +46,14 @@ export function browserTool(): ToolDef {
   return {
     name: "browser",
     description:
-      "Browser automation via Playwright or CDP. Actions: navigate, screenshot, click, type, scroll, evaluate. " +
-      "Set SKELETON_BROWSER_BACKEND=playwright (default) or cdp. For CDP, also set SKELETON_CDP_WS_URL.",
+      "Browser automation via Playwright, CDP, or CamoFox. Actions: navigate, screenshot, click, type, scroll, evaluate, snapshot, back, close. " +
+      "Set SKELETON_BROWSER_BACKEND=playwright (default), cdp, or camofox. For CDP, use /browser connect first.",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["navigate", "screenshot", "click", "type", "scroll", "evaluate"],
+          enum: ["navigate", "screenshot", "click", "type", "scroll", "evaluate", "snapshot", "back", "close"],
           description: "Browser action to perform",
         },
         url: {
@@ -116,6 +77,12 @@ export function browserTool(): ToolDef {
           default: false,
           description: "Capture full page screenshot (for 'screenshot' action)",
         },
+        direction: {
+          type: "string",
+          enum: ["up", "down"],
+          default: "down",
+          description: "Scroll direction (for 'scroll' action)",
+        },
       },
       required: ["action"],
     },
@@ -127,6 +94,7 @@ export function browserTool(): ToolDef {
         text,
         js,
         fullPage = false,
+        direction = "down",
       } = args as {
         action: string;
         url?: string;
@@ -134,15 +102,19 @@ export function browserTool(): ToolDef {
         text?: string;
         js?: string;
         fullPage?: boolean;
+        direction?: string;
       };
 
       const backend = process.env.SKELETON_BROWSER_BACKEND ?? "playwright";
 
       try {
         if (backend === "cdp") {
-          return await handleCdpAction(action, url, selector, text, js);
+          return await handleCdpAction(action, url, selector, text, js, fullPage, direction);
         }
-        return await handlePlaywrightAction(action, url, selector, text, js, fullPage);
+        if (backend === "camofox") {
+          return await handleCamoFoxAction(action, url, selector, text, js, direction);
+        }
+        return await handlePlaywrightAction(action, url, selector, text, js, fullPage, direction);
       } catch (err) {
         const msg = (err as Error).message;
         if (msg.includes("Target closed") || msg.includes("Browser closed") || msg.includes("disconnected")) {
@@ -165,6 +137,7 @@ async function handlePlaywrightAction(
   text?: string,
   js?: string,
   fullPage?: boolean,
+  direction?: string,
 ): Promise<unknown> {
   switch (action) {
     case "navigate": {
@@ -210,8 +183,9 @@ async function handlePlaywrightAction(
     case "scroll": {
       const p = getPlaywrightPage();
       if (!p) return { error: "No active page. Use 'navigate' first." };
-      await p.mouse.wheel(0, 800);
-      return { success: true, message: "Scrolled down one viewport" };
+      const delta = direction === "up" ? -800 : 800;
+      await p.mouse.wheel(0, delta);
+      return { success: true, message: `Scrolled ${direction}` };
     }
 
     case "evaluate": {
@@ -222,8 +196,30 @@ async function handlePlaywrightAction(
       return { result };
     }
 
+    case "snapshot": {
+      const p = getPlaywrightPage();
+      if (!p) return { error: "No active page. Use 'navigate' first." };
+      const bodyText = await p.innerText("body").catch(() => "");
+      const truncated = bodyText.slice(0, 50000);
+      return { text: truncated, html_length: bodyText.length, url: p.url() };
+    }
+
+    case "back": {
+      const p = getPlaywrightPage();
+      if (!p) return { error: "No active page. Use 'navigate' first." };
+      await p.goBack({ timeout: 10000 }).catch(() => null);
+      return { url: p.url(), title: await p.title() };
+    }
+
+    case "close": {
+      if (page) { await page.close().catch(() => {}); page = null; }
+      if (browser) { await browser.close().catch(() => {}); browser = null; }
+      pw = null;
+      return { success: true, message: "Browser closed" };
+    }
+
     default:
-      return { error: `Unknown action: ${action}. Supported: navigate, screenshot, click, type, scroll, evaluate` };
+      return { error: `Unknown action: ${action}. Supported: navigate, screenshot, click, type, scroll, evaluate, snapshot, back, close` };
   }
 }
 
@@ -233,55 +229,167 @@ async function handleCdpAction(
   selector?: string,
   text?: string,
   js?: string,
+  fullPage?: boolean,
+  direction?: string,
 ): Promise<unknown> {
-  const wsUrl = process.env.SKELETON_CDP_WS_URL ?? "";
-  if (!wsUrl) return { error: "SKELETON_CDP_WS_URL not set for CDP backend" };
+  if (!cdpSupervisor.isConnected()) {
+    return { error: "CDP not connected. Use /browser connect <ws-url> first." };
+  }
 
   switch (action) {
     case "navigate": {
       if (!url) return { error: "Missing 'url' parameter for navigate" };
-      const result = await cdpSend(wsUrl, "Page.navigate", { url }) as { frameId?: string };
-      cdpPageInfo = { url, title: "" };
-      return { url, frameId: result.frameId ?? "" };
+      if (url.toLowerCase().startsWith("javascript:")) return { error: "BLOCKED: javascript: URI not allowed" };
+      const result = await cdpSupervisor.send("Page.navigate", { url }) as Record<string, unknown>;
+      await cdpSupervisor.send("Runtime.evaluate", { expression: "document.title", returnByValue: true })
+        .then(r => r as Record<string, unknown>)
+        .catch(() => null);
+      const titleResult = await cdpSupervisor.send("Runtime.evaluate", {
+        expression: "document.title",
+        returnByValue: true,
+      }).catch(() => ({ result: { value: "" } })) as { result?: { value?: string } };
+      return { url, title: titleResult.result?.value ?? "", frameId: result.frameId ?? "" };
     }
 
     case "screenshot": {
-      const result = await cdpSend(wsUrl, "Page.captureScreenshot", { format: "png" }) as { data?: string };
-      return { screenshot_base64: result.data ?? "", url: cdpPageInfo?.url ?? "" };
+      const result = await cdpSupervisor.send("Page.captureScreenshot", {
+        format: "png",
+      }) as { data?: string };
+      return { screenshot_base64: result.data ?? "", size_bytes: result.data ? Buffer.byteLength(result.data, "base64") : 0 };
     }
 
     case "click": {
-      if (!selector) return { error: "Missing 'selector' for click (CDP requires coordinates — use evaluate instead)" };
-      const jsResult = await cdpSend(wsUrl, "Runtime.evaluate", {
-        expression: `document.querySelector('${selector}')?.click(); 'clicked'`,
+      if (!selector) return { error: "Missing 'selector' for click" };
+      const safeSelector = JSON.stringify(selector);
+      const result = await cdpSupervisor.send("Runtime.evaluate", {
+        expression: `document.querySelector(${safeSelector})?.click(); 'clicked'`,
+        returnByValue: true,
       }) as { result?: { value?: string } };
-      return { success: true, result: jsResult.result?.value };
+      return { success: true, result: result.result?.value };
     }
 
     case "type": {
       if (!selector || text === undefined) return { error: "Missing 'selector' or 'text' for type" };
-      const jsResult = await cdpSend(wsUrl, "Runtime.evaluate", {
-        expression: `const el = document.querySelector('${selector}'); el.value = ${JSON.stringify(text)}; el.dispatchEvent(new Event('input', {bubbles:true})); 'typed'`,
+      const safeSelector = JSON.stringify(selector);
+      const safeText = JSON.stringify(text);
+      const result = await cdpSupervisor.send("Runtime.evaluate", {
+        expression: `const el = document.querySelector(${safeSelector}); if(el){el.focus();el.value=${safeText};el.dispatchEvent(new Event('input',{bubbles:true}));} 'typed'`,
+        returnByValue: true,
       }) as { result?: { value?: string } };
-      return { success: true, result: jsResult.result?.value };
+      return { success: true, result: result.result?.value };
     }
 
     case "scroll": {
-      await cdpSend(wsUrl, "Runtime.evaluate", {
-        expression: "window.scrollBy(0, 800); 'scrolled'",
+      const delta = direction === "up" ? -800 : 800;
+      await cdpSupervisor.send("Runtime.evaluate", {
+        expression: `window.scrollBy(0, ${delta}); 'scrolled'`,
+        returnByValue: true,
       });
-      return { success: true, message: "Scrolled down" };
+      return { success: true, message: `Scrolled ${direction}` };
     }
 
     case "evaluate": {
       if (!js) return { error: "Missing 'js' parameter for evaluate" };
-      const result = await cdpSend(wsUrl, "Runtime.evaluate", { expression: js, returnByValue: true }) as {
-        result?: { value?: unknown };
-      };
+      const result = await cdpSupervisor.send("Runtime.evaluate", {
+        expression: js,
+        returnByValue: true,
+      }) as { result?: { value?: unknown }; exceptionDetails?: unknown };
+      if (result.exceptionDetails) {
+        return { error: "Evaluation threw an exception", exceptionDetails: result.exceptionDetails };
+      }
       return { result: result.result?.value };
     }
 
+    case "snapshot": {
+      const result = await cdpSupervisor.send("Runtime.evaluate", {
+        expression: "document.body?.innerText?.slice(0, 50000) ?? ''",
+        returnByValue: true,
+      }) as { result?: { value?: string } };
+      return { text: result.result?.value ?? "", url: "" };
+    }
+
+    case "back": {
+      await cdpSupervisor.send("Page.navigateToHistoryEntry", { entryId: -1 }).catch(() => {
+        return cdpSupervisor.send("Runtime.evaluate", { expression: "history.back(); 'back'", returnByValue: true });
+      });
+      return { success: true, message: "Navigated back" };
+    }
+
+    case "close": {
+      cdpSupervisor.disconnect();
+      return { success: true, message: "CDP disconnected" };
+    }
+
     default:
-      return { error: `Unknown action: ${action}. Supported: navigate, screenshot, click, type, scroll, evaluate` };
+      return { error: `Unknown action: ${action}. Supported: navigate, screenshot, click, type, scroll, evaluate, snapshot, back, close` };
+  }
+}
+
+const CAMOFOX_DEFAULT = "http://localhost:9223";
+
+async function handleCamoFoxAction(
+  action: string,
+  url?: string,
+  selector?: string,
+  text?: string,
+  js?: string,
+  direction?: string,
+): Promise<unknown> {
+  const base = process.env.SKELETON_CAMOFOX_URL ?? CAMOFOX_DEFAULT;
+  const sessionId = process.env.SKELETON_CAMOFOX_SESSION ?? "default";
+
+  async function cfPost(path: string, body?: Record<string, unknown>): Promise<unknown> {
+    const resp = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return resp.json();
+  }
+
+  async function cfGet(path: string): Promise<unknown> {
+    const resp = await fetch(`${base}${path}`);
+    return resp.json();
+  }
+
+  const tabPath = `/sessions/${sessionId}/tabs/current`;
+
+  switch (action) {
+    case "navigate": {
+      if (!url) return { error: "Missing 'url' for navigate" };
+      return await cfPost(`${tabPath}/navigate`, { url });
+    }
+    case "snapshot": {
+      return await cfGet(`${tabPath}/snapshot`);
+    }
+    case "screenshot": {
+      const resp = await fetch(`${base}${tabPath}/screenshot`);
+      const buf = Buffer.from(await resp.arrayBuffer());
+      return { screenshot_base64: buf.toString("base64"), size_bytes: buf.length };
+    }
+    case "click": {
+      if (!selector) return { error: "Missing 'selector' for click" };
+      return await cfPost(`${tabPath}/click`, { ref: selector });
+    }
+    case "type": {
+      if (!selector || text === undefined) return { error: "Missing 'selector' or 'text' for type" };
+      return await cfPost(`${tabPath}/type`, { ref: selector, text });
+    }
+    case "scroll": {
+      return await cfPost(`${tabPath}/scroll`, { direction: direction ?? "down" });
+    }
+    case "back": {
+      return await cfPost(`${tabPath}/back`);
+    }
+    case "close": {
+      await fetch(`${base}/sessions/${sessionId}`, { method: "DELETE" });
+      return { success: true, message: "CamoFox session closed" };
+    }
+    case "evaluate": {
+      if (!js) return { error: "CamoFox does not support evaluate — use snapshot instead" };
+      return { error: "CamoFox does not support JS evaluation" };
+    }
+    default:
+      return { error: `Unknown action: ${action}. CamoFox supports: navigate, snapshot, screenshot, click, type, scroll, back, close` };
   }
 }

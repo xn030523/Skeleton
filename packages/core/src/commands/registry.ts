@@ -42,6 +42,16 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     category: "Session",
   },
   {
+    name: "save",
+    description: "Save the current conversation to session database",
+    category: "Session",
+  },
+  {
+    name: "retry",
+    description: "Retry the last user message (resend to agent)",
+    category: "Session",
+  },
+  {
     name: "reset",
     description: "Reset conversation history",
     category: "Session",
@@ -55,6 +65,12 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     name: "undo",
     description: "Remove the last user/assistant exchange",
     category: "Session",
+  },
+  {
+    name: "title",
+    description: "Set a title for the current session",
+    category: "Session",
+    argsHint: "<name>",
   },
   {
     name: "compress",
@@ -87,8 +103,43 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     argsHint: "[text | status | pause | resume | clear]",
     subcommands: ["status", "pause", "resume", "clear"],
   },
+  {
+    name: "stop",
+    description: "Kill all running background processes",
+    category: "Session",
+  },
+  {
+    name: "agents",
+    description: "Show active agents and running tasks",
+    category: "Session",
+    aliases: ["tasks"],
+  },
+  {
+    name: "queue",
+    description: "Queue a prompt for the next turn (doesn't interrupt current)",
+    category: "Session",
+    aliases: ["q"],
+    argsHint: "<prompt>",
+  },
+  {
+    name: "steer",
+    description: "Inject a message after the next tool call without interrupting",
+    category: "Session",
+    argsHint: "<prompt>",
+  },
+  {
+    name: "rollback",
+    description: "List or restore filesystem checkpoints",
+    category: "Session",
+    argsHint: "[number]",
+  },
 
   // ── Configuration ──────────────────────────────────────────────────
+  {
+    name: "config",
+    description: "Show current configuration",
+    category: "Configuration",
+  },
   {
     name: "model",
     description: "Show current model and provider",
@@ -158,6 +209,18 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     category: "Tools",
   },
   {
+    name: "toolsets",
+    description: "List available toolsets",
+    category: "Tools",
+  },
+  {
+    name: "skills",
+    description: "Search, install, inspect, or manage skills",
+    category: "Tools",
+    argsHint: "[search|browse|inspect|install]",
+    subcommands: ["search", "browse", "inspect", "install"],
+  },
+  {
     name: "mcp",
     description: "List built-in MCP servers and how to enable them",
     category: "Tools",
@@ -173,6 +236,50 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     category: "Tools",
     argsHint: "[list|load|unload|reload]",
     subcommands: ["list", "load", "unload", "reload"],
+  },
+  {
+    name: "reload",
+    description: "Reload .env variables into the running session",
+    category: "Tools",
+  },
+  {
+    name: "reload-mcp",
+    description: "Reload MCP servers from config",
+    category: "Tools",
+    aliases: ["reload_mcp"],
+  },
+  {
+    name: "reload-skills",
+    description: "Re-scan skills directory for new or removed skills",
+    category: "Tools",
+    aliases: ["reload_skills"],
+  },
+  {
+    name: "browser",
+    description: "Connect browser tools via CDP",
+    category: "Tools",
+    argsHint: "[connect|disconnect|status]",
+    subcommands: ["connect", "disconnect", "status"],
+  },
+  {
+    name: "image",
+    description: "Attach a local image file for your next prompt",
+    category: "Tools",
+    argsHint: "<path>",
+  },
+  {
+    name: "kanban",
+    description: "Multi-profile collaboration board",
+    category: "Tools",
+    argsHint: "[list|create|complete|block|comment]",
+    subcommands: ["list", "create", "complete", "block", "comment"],
+  },
+  {
+    name: "sandbox",
+    description: "Switch or inspect sandbox backend (local/docker/ssh)",
+    category: "Tools",
+    argsHint: "[status|local|docker [image]|ssh <host> [user]|stop]",
+    subcommands: ["status", "local", "docker", "ssh", "stop"],
   },
 
   // ── Info ───────────────────────────────────────────────────────────
@@ -220,6 +327,46 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     category: "Configuration",
     argsHint: "[on|off|tts|stt]",
     subcommands: ["on", "off", "tts", "stt"],
+  },
+  {
+    name: "yolo",
+    description: "Toggle YOLO mode (skip all dangerous command approvals)",
+    category: "Configuration",
+  },
+  {
+    name: "reasoning",
+    description: "Manage reasoning effort level",
+    category: "Configuration",
+    argsHint: "[none|low|medium|high|show|hide]",
+    subcommands: ["none", "low", "medium", "high", "show", "hide"],
+  },
+  {
+    name: "fast",
+    description: "Toggle fast mode (priority processing)",
+    category: "Configuration",
+    argsHint: "[normal|fast|status]",
+    subcommands: ["normal", "fast", "status"],
+  },
+  {
+    name: "footer",
+    description: "Toggle runtime metadata footer on replies",
+    category: "Configuration",
+    argsHint: "[on|off|status]",
+    subcommands: ["on", "off", "status"],
+  },
+  {
+    name: "indicator",
+    description: "Pick TUI busy-indicator style",
+    category: "Configuration",
+    argsHint: "[kaomoji|emoji|unicode|ascii]",
+    subcommands: ["kaomoji", "emoji", "unicode", "ascii"],
+  },
+  {
+    name: "busy",
+    description: "Control what Enter does while agent is working",
+    category: "Configuration",
+    argsHint: "[queue|steer|interrupt|status]",
+    subcommands: ["queue", "steer", "interrupt", "status"],
   },
   {
     name: "sessions",

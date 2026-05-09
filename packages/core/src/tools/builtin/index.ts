@@ -6,10 +6,9 @@ import { peInfoTool } from "./pe-info.js";
 import { elfInfoTool } from "./elf-info.js";
 import { entropyTool } from "./entropy.js";
 import { disassembleTool } from "./disassemble.js";
-import { webSearchTool } from "./web-search.js";
+import { webSearchTool } from "../web-tools.js";
 import { webFetchTool } from "./web-fetch.js";
-import { terminalTool } from "./terminal.js";
-import { browserTool } from "./browser.js";
+import { sandboxTerminalTool } from "../../sandbox.js";
 
 export function builtInTools(): ToolDef[] {
   const tools: ToolDef[] = [
@@ -22,22 +21,21 @@ export function builtInTools(): ToolDef[] {
     disassembleTool(),
     webSearchTool(),
     webFetchTool(),
-    terminalTool(),
-    browserTool(),
+    sandboxTerminalTool(),
   ];
 
   const toolsetMap: Record<string, string> = {
     identify: "re", hexdump: "re", strings: "re", pe_info: "re", elf_info: "re",
     entropy: "re", disassemble: "re",
     web_search: "web", web_fetch: "web",
-    terminal: "system", browser: "browser",
+    terminal: "system",
   };
 
   const emojiMap: Record<string, string> = {
     identify: "🔍", hexdump: "📐", strings: "📝", pe_info: "🪟", elf_info: "🐧",
     entropy: "📊", disassemble: "⚙️",
     web_search: "🌐", web_fetch: "📄",
-    terminal: "💻", browser: "🌍",
+    terminal: "💻",
   };
 
   for (const t of tools) {

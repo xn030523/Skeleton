@@ -64,8 +64,8 @@ export type { PtcConfig } from "./ptc.js";
 export { moaTool, runMoa } from "./moa.js";
 export type { MoaConfig } from "./moa.js";
 export { CheckpointManager } from "./checkpoint.js";
-export { executeInSandbox, sandboxTerminalTool } from "./sandbox.js";
-export type { SandboxBackend, SandboxConfig } from "./sandbox.js";
+export { executeInSandbox, sandboxTerminalTool, cleanupSandboxes, DockerSandbox, SSHSandbox } from "./sandbox.js";
+export type { SandboxBackend, SandboxConfig, DockerSandboxOptions, SandboxExecResult } from "./sandbox.js";
 export { AcpServer } from "./acp.js";
 export type { AcpSession } from "./acp.js";
 export { ApiServer } from "./api-server.js";
@@ -107,7 +107,19 @@ export { routeImage } from "./tools/image-routing.js";
 export type { ImageRouteMode, ImageRouteResult } from "./tools/image-routing.js";
 export { imageGenTool } from "./tools/image-gen.js";
 export { browserTool } from "./tools/browser-tool.js";
+export { CdpSupervisor, cdpSupervisor } from "./tools/browser-supervisor.js";
+export type { FrameInfo, PendingDialog, ConsoleEvent } from "./tools/browser-supervisor.js";
+export { browserDialogTool } from "./tools/browser-dialog-tool.js";
+export { findChromePath, discoverCdpUrl, launchChrome, manualChromeCommand } from "./tools/browser-connect.js";
 export { webSearchTool } from "./tools/web-tools.js";
+export {
+  registerSearchProvider,
+  getSearchProvider,
+  listSearchProviders,
+  listConfiguredProviders,
+  getConfiguredProvidersSorted,
+} from "./tools/web-search-providers.js";
+export type { WebSearchProvider, SearchResult } from "./tools/web-search-providers.js";
 export { setWriteOrigin, getWriteOrigin, isAgentCreated } from "./skills/provenance.js";
 export { bumpSkillUsage, getSkillUsageData, updateSkillLifecycle } from "./skills/usage.js";
 export type { SkillLifecycle, SkillUsageData } from "./skills/usage.js";
@@ -212,3 +224,20 @@ export { BackgroundTaskManager } from "./bg-tasks.js";
 export type { BgTask } from "./bg-tasks.js";
 export { getAgentStatus, formatAgentStatus } from "./agent-status.js";
 export type { AgentStatusReport } from "./agent-status.js";
+export type { ParseResult, ToolCallResult } from "./tool-call-parsers/index.js";
+export {
+  ToolCallParser,
+  getParser,
+  listParsers,
+  hasParser,
+  registerParser,
+  HermesParser,
+  MistralParser,
+  QwenParser,
+  DeepSeekV3Parser,
+  DeepSeekV31Parser,
+  LlamaParser,
+  GlmParser,
+  Glm47Parser,
+  KimiK2Parser,
+} from "./tool-call-parsers/index.js";

@@ -25,10 +25,12 @@
     "yaml": "^2.7.0"
   },
   "peerDependencies": {
-    "duck-duck-scrape": ">=2.0.0"
+    "duck-duck-scrape": ">=2.0.0",
+    "ws": ">=8.0.0"
   },
   "peerDependenciesMeta": {
-    "duck-duck-scrape": { "optional": true }
+    "duck-duck-scrape": { "optional": true },
+    "ws": { "optional": true }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

@@ -123,8 +123,10 @@ Legacy (still works):
       { ...config, tools },
       mem, profile, cron, sessionDb, projectContext, honcho,
     );
+    agent.setMcpClients(mcpClients, mcpServerToolMap);
     const result = await agent.run(job.prompt);
-    await agent.close();
+    // Don't close shared MCP connections
+    await agent.close({ closeMcp: false });
 
     if (!job.silent && job.delivery.includes("webhook") && job.webhookUrl) {
       try {

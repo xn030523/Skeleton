@@ -1,12 +1,13 @@
 /**
- * Environment Backends — 9 execution environment backends.
+ * Environment Backends — 7 execution environment backends.
  * Base class + local, docker, ssh (existing in sandbox.ts),
- * plus Modal, Daytona, Singularity, Vercel Sandbox, SSH+FS.
+ * plus Modal, Daytona, Singularity, Vercel Sandbox.
  *
  * Inspired by Hermes tools/environments/ (9 backends).
  */
 
 import type { SandboxConfig } from "../sandbox.js";
+import { executeInSandbox } from "../sandbox.js";
 
 export interface ExecResult {
   stdout: string;
@@ -46,7 +47,6 @@ export class DaytonaBackend implements EnvironmentBackend {
   name = "daytona";
   isAvailable(): boolean { return !!process.env.DAYTONA_API_KEY; }
   async spawn(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string>; timeout?: number }): Promise<ExecResult> {
-    // Daytona API-based execution
     const apiKey = process.env.DAYTONA_API_KEY!;
     const serverUrl = process.env.DAYTONA_SERVER_URL ?? "https://api.daytona.io";
     const start = Date.now();
@@ -120,12 +120,23 @@ export function resolveBackend(config?: SandboxConfig): EnvironmentBackend {
     case "singularity": return new SingularityBackend();
     case "vercel": case "vercel-sandbox": return new VercelSandboxBackend();
     default: {
-      // Import existing backends from sandbox.ts
-      const { executeInSandbox } = require("../sandbox.js") as typeof import("../sandbox.js");
+      // Route local/docker/ssh through sandbox.ts executeInSandbox
       return {
         name: backend,
         isAvailable: () => true,
-        spawn: async (cmd, a, o) => executeInSandbox(`${cmd} ${a.join(" ")}`, { ...config, ...o }),
+        spawn: async (cmd, a, o) => {
+          const result = await executeInSandbox(`${cmd} ${a.join(" ")}`, {
+            backend: backend as "local" | "docker" | "ssh",
+            defaultTimeout: o?.timeout,
+            dockerCwd: o?.cwd,
+          });
+          return {
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+          };
+        },
       } as EnvironmentBackend;
     }
   }

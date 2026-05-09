@@ -88,6 +88,12 @@ export async function processCommandAsync(
       adapter.addLines([chalk.green("✓ New session."), chalk.gray("─".repeat(60))]);
       return true;
 
+    case "save":
+      return cmdSave(ctx, adapter);
+
+    case "retry":
+      return cmdRetry(ctx, adapter);
+
     case "reset":
       ctx.agent.reset();
       adapter.addLine(chalk.gray("✓ Conversation reset."));
@@ -101,6 +107,9 @@ export async function processCommandAsync(
       adapter.addLine(ok ? chalk.green("  ✓ Last turn undone.") : chalk.gray("  Nothing to undo."));
       return true;
     }
+
+    case "title":
+      return cmdTitle(ctx, adapter, parts);
 
     case "compress":
       adapter.addLine(chalk.gray("  Compressing..."));
@@ -124,6 +133,21 @@ export async function processCommandAsync(
     case "goal":
       return cmdGoal(ctx, adapter, parts);
 
+    case "stop":
+      return cmdStop(ctx, adapter);
+
+    case "agents":
+      return cmdAgents(ctx, adapter);
+
+    case "queue":
+      return cmdQueue(ctx, adapter, parts);
+
+    case "steer":
+      return cmdSteer(ctx, adapter, parts);
+
+    case "rollback":
+      return cmdRollback(ctx, adapter, parts);
+
     case "copy":
       return cmdCopy(ctx, adapter);
 
@@ -137,6 +161,9 @@ export async function processCommandAsync(
       return true;
 
     // ── Configuration ──
+    case "config":
+      return cmdConfig(ctx, adapter);
+
     case "model":
       adapter.addLines([
         chalk.gray(`  ${ctx.config.llm.protocol} | ${ctx.config.llm.model}`),
@@ -164,6 +191,24 @@ export async function processCommandAsync(
 
     case "voice":
       return cmdVoice(ctx, adapter, parts);
+
+    case "yolo":
+      return cmdYolo(ctx, adapter);
+
+    case "reasoning":
+      return cmdReasoning(ctx, adapter, parts);
+
+    case "fast":
+      return cmdFast(ctx, adapter, parts);
+
+    case "footer":
+      return cmdFooter(ctx, adapter, parts);
+
+    case "indicator":
+      return cmdIndicator(ctx, adapter, parts);
+
+    case "busy":
+      return cmdBusy(ctx, adapter, parts);
 
     // ── Memory ──
     case "memory":
@@ -203,6 +248,12 @@ export async function processCommandAsync(
     case "tools":
       return cmdTools(ctx, adapter);
 
+    case "toolsets":
+      return cmdToolsets(ctx, adapter);
+
+    case "skills":
+      return cmdSkills(ctx, adapter, parts);
+
     case "mcp":
       adapter.addLine(chalk.gray("  Use /tools to see available tools including MCP-provided ones."));
       return true;
@@ -212,6 +263,27 @@ export async function processCommandAsync(
 
     case "plugin":
       return cmdPlugin(ctx, adapter, parts);
+
+    case "reload":
+      return cmdReload(ctx, adapter);
+
+    case "reload-mcp":
+      return cmdReloadMcp(ctx, adapter);
+
+    case "reload-skills":
+      return cmdReloadSkills(ctx, adapter);
+
+    case "browser":
+      return cmdBrowser(ctx, adapter, parts);
+
+    case "image":
+      return cmdImage(ctx, adapter, parts);
+
+    case "kanban":
+      return cmdKanban(ctx, adapter, parts);
+
+    case "sandbox":
+      return cmdSandbox(ctx, adapter, parts);
 
     case "security":
       return cmdSecurity(adapter, parts);
@@ -463,6 +535,78 @@ function cmdPaste(ctx: CommandContext, adapter: OutputAdapter): boolean {
   }
   adapter.setInput(text.slice(0, 500));
   adapter.addLine(chalk.green(`  ✓ Pasted ${text.length} chars from clipboard — press Enter to submit`));
+  return true;
+}
+
+function cmdTitle(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const sessionId = agent["sessionId"] ?? "";
+  const title = parts.slice(1).join(" ");
+  if (!title) {
+    let current: string | null = null;
+    if (sessionId && typeof (ctx.sessionDb as any).getSessionTitle === "function") {
+      current = (ctx.sessionDb as any).getSessionTitle(sessionId);
+    }
+    adapter.addLine(chalk.gray(`  Current title: ${current ?? "(untitled)"}`));
+    adapter.addLine(chalk.gray("  Usage: /title <name>"));
+  } else {
+    if (sessionId && typeof (ctx.sessionDb as any).setSessionTitle === "function") {
+      (ctx.sessionDb as any).setSessionTitle(sessionId, title);
+    }
+    adapter.addLine(chalk.green(`  ✓ Title set: ${title}`));
+  }
+  return true;
+}
+
+function cmdRetry(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const history = ctx.agent.getHistory();
+  const lastUser = [...history].reverse().find(m => m.role === "user");
+  if (!lastUser?.content) {
+    adapter.addLine(chalk.gray("  No user message to retry."));
+    return true;
+  }
+  ctx.agent.undoLastTurn();
+  adapter.addLine(chalk.green(`  ✓ Retrying: ${lastUser.content.slice(0, 80)}${lastUser.content.length > 80 ? "..." : ""}`));
+  adapter.setInput(lastUser.content);
+  return true;
+}
+
+function cmdSave(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const history = ctx.agent.getHistory();
+  if (history.length === 0) {
+    adapter.addLine(chalk.gray("  Nothing to save — session is empty."));
+    return true;
+  }
+  const agent = ctx.agent as any;
+  const sessionId = agent["sessionId"] ?? "";
+  if (sessionId && ctx.sessionDb) {
+    for (const msg of history) {
+      ctx.sessionDb.mirrorToSession(sessionId, msg.role, msg.content ?? "");
+    }
+    adapter.addLine(chalk.green(`  ✓ Saved ${history.length} messages to session [${sessionId.slice(0, 12)}]`));
+  } else {
+    adapter.addLine(chalk.yellow("  ⚠ No active session ID — messages are in-memory only"));
+  }
+  return true;
+}
+
+function cmdConfig(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const agent = ctx.agent as any;
+  const lines: string[] = [
+    chalk.cyan("  Configuration:"),
+    `    Protocol: ${chalk.white(ctx.config.llm.protocol)}`,
+    `    Model: ${chalk.white(ctx.config.llm.model)}`,
+    `    Base URL: ${chalk.white(ctx.config.llm.baseUrl)}`,
+    `    Progress mode: ${chalk.white(ctx.agent.progressMode)}`,
+    `    Status bar: ${chalk.white(ctx.agent.statusBarMode)}`,
+    `    Voice mode: ${chalk.white(ctx.agent.voiceMode)}`,
+  ];
+  const personality = ctx.agent.getPersonality();
+  if (personality) lines.push(`    Personality: ${chalk.white(personality.getActiveName())}`);
+  const skin = ctx.agent.skin;
+  if (skin) lines.push(`    Skin: ${chalk.white(skin.getActiveName())}`);
+  if (agent["maxTurns"]) lines.push(`    Max turns: ${chalk.white(agent["maxTurns"])}`);
+  adapter.addLines(lines);
   return true;
 }
 
@@ -891,6 +1035,458 @@ function cmdCron(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): 
   return true;
 }
 
+function cmdStop(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const agent = ctx.agent as any;
+  const procs = agent["processRegistry"];
+  if (!procs) {
+    adapter.addLine(chalk.gray("  No process registry available."));
+    return true;
+  }
+  const running = procs.list().filter((p: any) => p.status === "running");
+  if (running.length === 0) {
+    adapter.addLine(chalk.gray("  No running background processes."));
+    return true;
+  }
+  for (const p of running) {
+    procs.kill(p.id);
+  }
+  adapter.addLine(chalk.green(`  ✓ Stopped ${running.length} process(es)`));
+  return true;
+}
+
+function cmdAgents(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const agent = ctx.agent as any;
+  const bgTasks = agent["bgTasks"];
+  const procs = agent["processRegistry"];
+  const lines: string[] = [chalk.cyan("  Active agents & tasks:")];
+
+  const bgList = bgTasks?.list() ?? [];
+  const running = bgList.filter((t: any) => t.status === "running");
+  const completed = bgList.filter((t: any) => t.status === "completed");
+  if (running.length > 0) {
+    lines.push(chalk.yellow(`  Running (${running.length}):`));
+    for (const t of running) lines.push(`    ${chalk.white(t.id)} ${t.command.slice(0, 60)}`);
+  }
+  if (completed.length > 0) {
+    lines.push(chalk.green(`  Completed (${completed.length}):`));
+    for (const t of completed.slice(-5)) lines.push(`    ${chalk.gray(t.id)} ${t.command.slice(0, 60)}`);
+  }
+  if (running.length === 0 && completed.length === 0) {
+    lines.push(chalk.gray("  No active tasks."));
+  }
+  const goal = ctx.agent.getGoal();
+  if (goal) {
+    lines.push(`  Goal: ${chalk.white(goal.goal)} ${chalk.gray(`[${goal.status}]`)}`);
+  }
+  adapter.addLines(lines);
+  return true;
+}
+
+function cmdQueue(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const text = parts.slice(1).join(" ");
+  if (!text) {
+    adapter.addLine(chalk.gray("  Usage: /queue <prompt>"));
+    return true;
+  }
+  const agent = ctx.agent as any;
+  if (!agent["pendingQueue"]) agent["pendingQueue"] = [];
+  agent["pendingQueue"].push(text);
+  adapter.addLine(chalk.green(`  ✓ Queued: ${text.slice(0, 80)}${text.length > 80 ? "..." : ""}`));
+  return true;
+}
+
+function cmdSteer(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const text = parts.slice(1).join(" ");
+  if (!text) {
+    adapter.addLine(chalk.gray("  Usage: /steer <prompt>"));
+    return true;
+  }
+  const agent = ctx.agent as any;
+  agent["steerMessage"] = text;
+  adapter.addLine(chalk.green(`  ✓ Steer set: will inject after next tool call`));
+  return true;
+}
+
+function cmdRollback(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const checkpoints = agent["checkpoints"] ?? agent["checkpointManager"];
+  if (!checkpoints) {
+    adapter.addLine(chalk.gray("  Checkpoint system not available."));
+    return true;
+  }
+  const sub = parts[1];
+  if (!sub || sub === "list") {
+    const list = checkpoints.list?.() ?? [];
+    if (list.length === 0) {
+      adapter.addLine(chalk.gray("  No checkpoints available."));
+    } else {
+      adapter.addLines([
+        chalk.cyan("  Checkpoints:"),
+        ...list.map((c: any, i: number) => `    ${chalk.white(`#${i}`)} ${chalk.gray(c.timestamp ?? c.name ?? "")}`),
+      ]);
+    }
+  } else {
+    const idx = parseInt(sub);
+    if (isNaN(idx)) {
+      adapter.addLine(chalk.gray("  Usage: /rollback [number]"));
+    } else {
+      const ok = checkpoints.restore?.(idx);
+      adapter.addLine(ok ? chalk.green(`  ✓ Restored checkpoint #${idx}`) : chalk.red(`  ✗ Checkpoint #${idx} not found`));
+    }
+  }
+  return true;
+}
+
+function cmdYolo(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const agent = ctx.agent as any;
+  const approval = agent["approvalSystem"];
+  if (!approval) {
+    adapter.addLine(chalk.gray("  Approval system not available."));
+    return true;
+  }
+  const current = approval.yoloMode ?? false;
+  approval.yoloMode = !current;
+  adapter.addLines([
+    approval.yoloMode
+      ? chalk.yellow("  ⚠ YOLO mode ON — all dangerous command approvals skipped")
+      : chalk.green("  ✓ YOLO mode OFF — approvals restored"),
+  ]);
+  return true;
+}
+
+function cmdReasoning(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const levels = ["none", "low", "medium", "high"] as const;
+  const sub = parts[1];
+
+  if (!sub || sub === "status" || sub === "show") {
+    const current = agent["reasoningEffort"] ?? agent["llmConfig"]?.reasoningEffort ?? "medium";
+    adapter.addLines([
+      chalk.cyan("  Reasoning effort:"),
+      `    Current: ${chalk.white(current)}`,
+      chalk.gray("    Levels: none | low | medium | high"),
+    ]);
+  } else if (sub === "hide") {
+    agent["showReasoning"] = false;
+    adapter.addLine(chalk.green("  ✓ Reasoning display hidden"));
+  } else if (levels.includes(sub as typeof levels[number])) {
+    if (agent["llmConfig"]) agent["llmConfig"].reasoningEffort = sub;
+    agent["reasoningEffort"] = sub;
+    adapter.addLine(chalk.green(`  ✓ Reasoning effort: ${sub}`));
+  } else {
+    adapter.addLine(chalk.gray(`  Usage: /reasoning [${levels.join("|")}|show|hide]`));
+  }
+  return true;
+}
+
+function cmdFast(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const sub = parts[1];
+  const current = agent["fastMode"] ?? false;
+
+  if (!sub || sub === "status") {
+    adapter.addLines([
+      chalk.cyan("  Fast mode:"),
+      `    Status: ${current ? chalk.yellow("ON") : chalk.green("OFF")}`,
+      chalk.gray("    Usage: /fast [normal|fast|on|off]"),
+    ]);
+  } else if (sub === "fast" || sub === "on") {
+    agent["fastMode"] = true;
+    adapter.addLine(chalk.green("  ✓ Fast mode ON"));
+  } else if (sub === "normal" || sub === "off") {
+    agent["fastMode"] = false;
+    adapter.addLine(chalk.green("  ✓ Fast mode OFF (normal)"));
+  } else {
+    adapter.addLine(chalk.gray("  Usage: /fast [normal|fast|on|off|status]"));
+  }
+  return true;
+}
+
+function cmdFooter(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const sub = parts[1];
+  const current = agent["showFooter"] ?? true;
+
+  if (!sub || sub === "status") {
+    adapter.addLines([
+      chalk.cyan("  Runtime footer:"),
+      `    Status: ${current ? chalk.green("ON") : chalk.gray("OFF")}`,
+    ]);
+  } else if (sub === "on") {
+    agent["showFooter"] = true;
+    adapter.addLine(chalk.green("  ✓ Footer ON"));
+  } else if (sub === "off") {
+    agent["showFooter"] = false;
+    adapter.addLine(chalk.green("  ✓ Footer OFF"));
+  } else {
+    adapter.addLine(chalk.gray("  Usage: /footer [on|off|status]"));
+  }
+  return true;
+}
+
+function cmdIndicator(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const styles = ["kaomoji", "emoji", "unicode", "ascii"] as const;
+  const sub = parts[1];
+
+  if (!sub) {
+    const current = agent["indicatorStyle"] ?? "emoji";
+    adapter.addLines([
+      chalk.cyan("  Busy indicator:"),
+      `    Current: ${chalk.white(current)}`,
+      chalk.gray("    Styles: kaomoji | emoji | unicode | ascii"),
+    ]);
+  } else if (styles.includes(sub as typeof styles[number])) {
+    agent["indicatorStyle"] = sub;
+    adapter.addLine(chalk.green(`  ✓ Indicator style: ${sub}`));
+  } else {
+    adapter.addLine(chalk.gray("  Usage: /indicator [kaomoji|emoji|unicode|ascii]"));
+  }
+  return true;
+}
+
+function cmdBusy(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const modes = ["queue", "steer", "interrupt"] as const;
+  const sub = parts[1];
+
+  if (!sub || sub === "status") {
+    const current = agent["busyAction"] ?? "interrupt";
+    adapter.addLines([
+      chalk.cyan("  Busy action (Enter while working):"),
+      `    Current: ${chalk.white(current)}`,
+      chalk.gray("    Modes: queue | steer | interrupt"),
+    ]);
+  } else if (modes.includes(sub as typeof modes[number])) {
+    agent["busyAction"] = sub;
+    adapter.addLine(chalk.green(`  ✓ Busy action: ${sub}`));
+  } else {
+    adapter.addLine(chalk.gray("  Usage: /busy [queue|steer|interrupt|status]"));
+  }
+  return true;
+}
+
+function cmdToolsets(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const registry = ctx.agent.getToolRegistry();
+  const toolsets = (registry as any)["toolsets"] ?? {};
+  const keys = Object.keys(toolsets);
+  if (keys.length === 0) {
+    adapter.addLine(chalk.gray("  No toolsets configured."));
+    return true;
+  }
+  adapter.addLines([
+    chalk.cyan("  Toolsets:"),
+    ...keys.map(k => {
+      const tools: string[] = toolsets[k]?.tools ?? [];
+      return `    ${chalk.white(k)} ${chalk.gray(`(${tools.length} tools): ${tools.join(", ")}`)}`;
+    }),
+  ]);
+  return true;
+}
+
+function cmdSkills(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const skillReg = ctx.agent.getSkillRegistry();
+  const sub = parts[1];
+
+  if (!sub || sub === "list" || sub === "browse") {
+    const all = skillReg.list();
+    if (all.length === 0) {
+      adapter.addLine(chalk.gray("  No skills installed. Place skills in ~/.skeleton/skills/"));
+    } else {
+      adapter.addLines([
+        chalk.cyan(`  Skills (${all.length}):`),
+        ...all.map(s => `    ${chalk.white(`/${s.name}`)}${s.userInvocable ? chalk.green(" ⚡") : ""} — ${(s.description ?? "").slice(0, 70)}`),
+      ]);
+    }
+  } else if (sub === "search" && parts[2]) {
+    const query = parts.slice(2).join(" ").toLowerCase();
+    const all = skillReg.list();
+    const matches = all.filter(s => s.name.toLowerCase().includes(query) || (s.description ?? "").toLowerCase().includes(query));
+    if (matches.length === 0) {
+      adapter.addLine(chalk.gray(`  No skills matching "${query}"`));
+    } else {
+      adapter.addLines([
+        chalk.cyan(`  Search results (${matches.length}):`),
+        ...matches.map(s => `    ${chalk.white(`/${s.name}`)} — ${(s.description ?? "").slice(0, 70)}`),
+      ]);
+    }
+  } else if (sub === "inspect" && parts[2]) {
+    const skill = skillReg.get(parts[2]);
+    if (skill) {
+      adapter.addLines([
+        chalk.cyan(`  Skill: ${skill.name}`),
+        `    Description: ${skill.description ?? "(none)"}`,
+        `    Invocable: ${skill.userInvocable ? "yes" : "no"}`,
+      ]);
+    } else {
+      adapter.addLine(chalk.red(`  ✗ Skill "${parts[2]}" not found`));
+    }
+  } else {
+    adapter.addLine(chalk.gray("  Usage: /skills [search|browse|inspect] [query|name]"));
+  }
+  return true;
+}
+
+function cmdReload(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  try {
+    const { loadEnv } = require("../env.js") as typeof import("../env.js");
+    loadEnv();
+    adapter.addLine(chalk.green("  ✓ .env variables reloaded"));
+  } catch (err) {
+    adapter.addLine(chalk.red(`  ✗ Reload failed: ${(err as Error).message}`));
+  }
+  return true;
+}
+
+function cmdReloadMcp(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const mcpHost = (ctx.agent as any)["mcpHost"];
+  if (!mcpHost) {
+    adapter.addLine(chalk.gray("  MCP host not available."));
+    return true;
+  }
+  try {
+    mcpHost.reload?.();
+    adapter.addLine(chalk.green("  ✓ MCP servers reloaded from config"));
+  } catch (err) {
+    adapter.addLine(chalk.red(`  ✗ MCP reload failed: ${(err as Error).message}`));
+  }
+  return true;
+}
+
+function cmdReloadSkills(ctx: CommandContext, adapter: OutputAdapter): boolean {
+  const skillReg = ctx.agent.getSkillRegistry();
+  try {
+    skillReg.rescan?.();
+    const count = skillReg.list().length;
+    adapter.addLine(chalk.green(`  ✓ Skills reloaded — ${count} skill(s) found`));
+  } catch (err) {
+    adapter.addLine(chalk.red(`  ✗ Skills reload failed: ${(err as Error).message}`));
+  }
+  return true;
+}
+
+function cmdBrowser(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const sub = parts[1];
+  // Lazy-import to avoid bundling ws when not needed
+  const { cdpSupervisor } = require("../tools/browser-supervisor.js") as typeof import("../tools/browser-supervisor.js");
+
+  if (!sub || sub === "status") {
+    const connected = cdpSupervisor.isConnected();
+    const backend = process.env.SKELETON_BROWSER_BACKEND ?? "playwright";
+    const dialogs = cdpSupervisor.getPendingDialogs();
+    adapter.addLines([
+      chalk.cyan("  Browser:"),
+      `    Backend: ${chalk.white(backend)}`,
+      `    CDP: ${connected ? chalk.green("connected") + " " + cdpSupervisor.getWsUrl() : chalk.gray("disconnected")}`,
+      ...(dialogs.length > 0 ? [chalk.yellow(`    Pending dialogs: ${dialogs.length}`)] : []),
+      chalk.gray("    Usage: /browser [connect <url>|disconnect|status]"),
+    ]);
+  } else if (sub === "connect") {
+    const wsUrl = parts[2];
+    const doConnect = (url: string) => {
+      cdpSupervisor.connect(url)
+        .then(() => {
+          process.env.SKELETON_BROWSER_BACKEND = "cdp";
+          process.env.SKELETON_CDP_WS_URL = url;
+          adapter.addLine(chalk.green(`  ✓ Connected to ${url}`));
+        })
+        .catch((err: Error) => {
+          adapter.addLine(chalk.red(`  ✗ Connection failed: ${err.message}`));
+        });
+    };
+
+    if (!wsUrl) {
+      // Auto-discover: try existing CDP URL or localhost discovery
+      const envUrl = process.env.SKELETON_CDP_WS_URL;
+      if (envUrl) {
+        doConnect(envUrl);
+      } else {
+        // Try localhost discovery, then Chrome auto-launch
+        const { discoverCdpUrl, launchChrome, manualChromeCommand } = require("../tools/browser-connect.js") as typeof import("../tools/browser-connect.js");
+        adapter.addLine(chalk.gray("  Discovering CDP endpoint on localhost:9222..."));
+        discoverCdpUrl(9222).then((discovered: string | null) => {
+          if (discovered) {
+            adapter.addLine(chalk.green(`  ✓ Found CDP at ${discovered}`));
+            doConnect(discovered);
+          } else {
+            adapter.addLine(chalk.gray("  No running CDP found. Attempting to launch Chrome..."));
+            launchChrome().then((result: { cdpUrl: string }) => {
+              adapter.addLine(chalk.green(`  ✓ Chrome launched, CDP at ${result.cdpUrl}`));
+              doConnect(result.cdpUrl);
+            }).catch(() => {
+              const cmd = manualChromeCommand();
+              adapter.addLines([
+                chalk.yellow("  ✗ Could not auto-launch Chrome."),
+                ...(cmd ? [chalk.gray(`  Run manually: ${cmd}`)] : []),
+                chalk.gray("  Then: /browser connect ws://127.0.0.1:9222/devtools/page/XXX"),
+              ]);
+            });
+          }
+        });
+      }
+    } else {
+      doConnect(wsUrl);
+    }
+  } else if (sub === "disconnect") {
+    cdpSupervisor.disconnect();
+    delete process.env.SKELETON_BROWSER_BACKEND;
+    delete process.env.SKELETON_CDP_WS_URL;
+    adapter.addLine(chalk.green("  ✓ Browser disconnected, reverted to playwright backend"));
+  }
+  return true;
+}
+
+function cmdImage(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const path = parts[1];
+  if (!path) {
+    adapter.addLine(chalk.gray("  Usage: /image <path>"));
+    return true;
+  }
+  const agent = ctx.agent as any;
+  agent["pendingImage"] = path;
+  adapter.addLine(chalk.green(`  ✓ Image attached: ${path} — will be included in your next prompt`));
+  return true;
+}
+
+function cmdKanban(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const sub = parts[1];
+  const agent = ctx.agent as any;
+  const kanban = agent["kanbanBoard"];
+
+  if (!kanban) {
+    adapter.addLine(chalk.gray("  Kanban board not available."));
+    return true;
+  }
+
+  if (!sub || sub === "list") {
+    const cards = kanban.list?.() ?? [];
+    if (cards.length === 0) {
+      adapter.addLine(chalk.gray("  No kanban cards. Usage: /kanban create <title>"));
+    } else {
+      adapter.addLines([
+        chalk.cyan("  Kanban board:"),
+        ...cards.map((c: any) => `    ${chalk.white(`#${c.id}`)} ${c.title} ${chalk.gray(`[${c.status}]`)}`),
+      ]);
+    }
+  } else if (sub === "create" && parts[2]) {
+    const title = parts.slice(2).join(" ");
+    const card = kanban.create?.(title);
+    adapter.addLine(chalk.green(`  ✓ Card created: ${title}`));
+  } else if (sub === "complete" && parts[2]) {
+    kanban.complete?.(parts[2]);
+    adapter.addLine(chalk.green(`  ✓ Card ${parts[2]} completed`));
+  } else if (sub === "block" && parts[2]) {
+    kanban.block?.(parts[2], parts[3] ?? "");
+    adapter.addLine(chalk.yellow(`  ⚠ Card ${parts[2]} blocked`));
+  } else if (sub === "comment" && parts[2]) {
+    kanban.comment?.(parts[2], parts.slice(3).join(" "));
+    adapter.addLine(chalk.green(`  ✓ Comment added to card ${parts[2]}`));
+  } else {
+    adapter.addLine(chalk.gray("  Usage: /kanban [list|create|complete|block|comment]"));
+  }
+  return true;
+}
+
 function cmdTrajectory(ctx: CommandContext, adapter: OutputAdapter): boolean {
   const { TrajectoryCompressor } = require("../trajectory-compressor.js") as typeof import("../trajectory-compressor.js");
   const compressor = new TrajectoryCompressor();
@@ -902,6 +1498,65 @@ function cmdTrajectory(ctx: CommandContext, adapter: OutputAdapter): boolean {
     `    Compressed: ${result.compressedLength.toLocaleString()} chars`,
     `    Ratio: ${(result.compressionRatio * 100).toFixed(1)}%`,
     `    Key turns: ${result.messages.filter(m => m.isKeyTurn).length}/${result.messages.length}`,
+  ]);
+  return true;
+}
+
+function cmdSandbox(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const sub = parts[1]?.toLowerCase();
+
+  if (!sub || sub === "status") {
+    const current = process.env.SKELETON_SANDBOX ?? "local";
+
+    adapter.addLines([
+      chalk.cyan("  Sandbox status:"),
+      `    Backend: ${chalk.bold(current)}`,
+      `    Docker image: ${process.env.SKELETON_DOCKER_IMAGE ?? "ubuntu:22.04"}`,
+      `    SSH host: ${process.env.SKELETON_SSH_HOST ?? "(not set)"}`,
+    ]);
+    return true;
+  }
+
+  if (sub === "local") {
+    process.env.SKELETON_SANDBOX = "local";
+    adapter.addLine(chalk.green("  ✓ Switched to local sandbox"));
+    return true;
+  }
+
+  if (sub === "docker") {
+    const image = parts[2];
+    if (image) process.env.SKELETON_DOCKER_IMAGE = image;
+    process.env.SKELETON_SANDBOX = "docker";
+    adapter.addLine(chalk.green(`  ✓ Switched to docker sandbox${image ? ` (image: ${image})` : ""}`));
+    return true;
+  }
+
+  if (sub === "ssh") {
+    const host = parts[2];
+    const user = parts[3];
+    if (!host) {
+      adapter.addLine(chalk.red("  ✗ Usage: /sandbox ssh <host> [user]"));
+      return true;
+    }
+    process.env.SKELETON_SSH_HOST = host;
+    if (user) process.env.SKELETON_SSH_USER = user;
+    process.env.SKELETON_SANDBOX = "ssh";
+    adapter.addLine(chalk.green(`  ✓ Switched to ssh sandbox (${user ?? "root"}@${host})`));
+    return true;
+  }
+
+  if (sub === "stop" || sub === "cleanup") {
+    const { cleanupSandboxes } = require("../sandbox.js") as typeof import("../sandbox.js");
+    cleanupSandboxes().then(() => {
+      adapter.addLine(chalk.green("  ✓ All sandbox resources cleaned up"));
+    }).catch((err: Error) => {
+      adapter.addLine(chalk.red(`  ✗ Cleanup failed: ${err.message}`));
+    });
+    return true;
+  }
+
+  adapter.addLines([
+    chalk.yellow("  Usage: /sandbox [status|local|docker [image]|ssh <host> [user]|stop]"),
   ]);
   return true;
 }

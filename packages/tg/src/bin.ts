@@ -91,7 +91,8 @@ const cronScheduler = new CronScheduler(cronStore, async (job) => {
   );
   agent.setMcpClients(mcpClients, mcpServerToolMap);
   const result = await agent.run(job.prompt);
-  await agent.close();
+  // Don't close shared MCP connections — other per-user agents still need them
+  await agent.close({ closeMcp: false });
 
   // Deliver to Telegram if configured and not silent
   if (!job.silent && job.delivery.includes("telegram")) {
@@ -123,8 +124,22 @@ interface UserState {
   agent: Agent;
   sessionId: string;
   lock: Promise<void>;
+  lastActive: number;
 }
 const users = new Map<number, UserState>();
+
+const USER_IDLE_MS = 30 * 60 * 1000; // 30 minutes
+
+// Periodic cleanup of idle user agents
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, state] of users) {
+    if (now - state.lastActive > USER_IDLE_MS) {
+      state.agent.close().catch(() => {});
+      users.delete(userId);
+    }
+  }
+}, 5 * 60 * 1000); // every 5 minutes
 
 const bot = new Bot(TOKEN);
 
@@ -185,10 +200,13 @@ function getState(userId: number): UserState {
       agent: new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho),
       sessionId: `tg_${userId}_${Date.now()}`,
       lock: Promise.resolve(),
+      lastActive: Date.now(),
     };
     state.agent.setMcpClients(mcpClients);
     sessionDb.createSession(state.sessionId, `Telegram ${userId}`);
     users.set(userId, state);
+  } else {
+    state.lastActive = Date.now();
   }
   return state;
 }

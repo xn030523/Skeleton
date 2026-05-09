@@ -19,7 +19,7 @@ import { findProvider, resolveProviderConfig } from "./providers/registry.js";
 
 const NO_TOOLS: ToolDef[] | undefined = undefined;
 
-type TaskKind = "vision" | "compression" | "webExtract" | "titleGeneration" | "judge" | "errorClassifier";
+type TaskKind = "vision" | "compression" | "webExtract" | "titleGeneration" | "judge" | "errorClassifier" | "sessionSearch" | "skillsHub" | "mcp";
 
 export type AuxiliaryTaskConfig = {
   vision?: AuxiliaryModelConfig;
@@ -28,6 +28,9 @@ export type AuxiliaryTaskConfig = {
   titleGeneration?: AuxiliaryModelConfig;
   judge?: AuxiliaryModelConfig;
   errorClassifier?: AuxiliaryModelConfig;
+  sessionSearch?: AuxiliaryModelConfig;
+  skillsHub?: AuxiliaryModelConfig;
+  mcp?: AuxiliaryModelConfig;
 };
 
 export class AuxiliaryClient {
@@ -219,6 +222,45 @@ export class AuxiliaryClient {
       };
     } catch (err) {
       return { done: false, reason: `judge error: ${(err as Error).message}` };
+    }
+  }
+
+  /** Semantic session search — find relevant past conversations using auxiliary LLM */
+  async searchSessions(query: string, sessionSummaries: string): Promise<string> {
+    const prompt = `Given the following session summaries, find sessions relevant to this query: "${query}"\n\nSessions:\n${sessionSummaries.slice(0, 4000)}\n\nReturn the most relevant session IDs and brief reasons why they match.`;
+    const messages: Message[] = [{ role: "user", content: prompt }];
+    try {
+      const resp = await this.getTransport("sessionSearch").send(prompt, messages, NO_TOOLS);
+      return resp.content ?? "No relevant sessions found.";
+    } catch (err) {
+      console.warn(`Auxiliary session search failed: ${(err as Error).message}`);
+      return `Session search error: ${(err as Error).message}`;
+    }
+  }
+
+  /** Skills hub query — find and rank skills using auxiliary LLM */
+  async querySkillsHub(query: string, skillList: string): Promise<string> {
+    const prompt = `Given these available skills, find the most relevant ones for: "${query}"\n\nSkills:\n${skillList.slice(0, 4000)}\n\nReturn the top 5 most relevant skills with brief explanations.`;
+    const messages: Message[] = [{ role: "user", content: prompt }];
+    try {
+      const resp = await this.getTransport("skillsHub").send(prompt, messages, NO_TOOLS);
+      return resp.content ?? "No relevant skills found.";
+    } catch (err) {
+      console.warn(`Auxiliary skills hub query failed: ${(err as Error).message}`);
+      return `Skills hub error: ${(err as Error).message}`;
+    }
+  }
+
+  /** MCP routing — determine which MCP servers to invoke using auxiliary LLM */
+  async routeMcp(query: string, mcpServerList: string): Promise<string> {
+    const prompt = `Given these MCP servers, determine which ones should be invoked for: "${query}"\n\nServers:\n${mcpServerList.slice(0, 4000)}\n\nReturn the server names and the specific tools/capabilities to use, as a JSON array of {server, reason}.`;
+    const messages: Message[] = [{ role: "user", content: prompt }];
+    try {
+      const resp = await this.getTransport("mcp").send(prompt, messages, NO_TOOLS);
+      return resp.content ?? "[]";
+    } catch (err) {
+      console.warn(`Auxiliary MCP routing failed: ${(err as Error).message}`);
+      return `MCP routing error: ${(err as Error).message}`;
     }
   }
 }
