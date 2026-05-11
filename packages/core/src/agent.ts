@@ -119,6 +119,7 @@ export class Agent {
   private lastPressureWarned: "ok" | "moderate" | "high" | "critical" = "ok";
   private model: string;
   private contextWindow: number;
+  private llmConfig: AgentConfig["llm"];
 
   // Tool progress callbacks (registered by CLI/TG for display)
   // Legacy signature: (name, args) / (name, preview)
@@ -187,6 +188,7 @@ export class Agent {
     this.basePrompt = config.systemPrompt ?? "You are Skeleton, a reverse engineering AI assistant.";
     this.model = config.llm.model;
     this.contextWindow = getContextWindow(config.llm.model);
+    this.llmConfig = config.llm;
     this.memory = memory ?? null;
     this.ownsMemory = !memory;
     this.userProfile = userProfile ?? null;
@@ -232,7 +234,10 @@ export class Agent {
     // Skill registry — register all skill groups + load agent-created from disk
     this.skillRegistry = new SkillRegistry();
     const skillConfig = config.skills ?? { ctf: true };
-    this.skillMode = skillConfig.ctf === "auto" ? "catalog" : "all";
+    // Progressive disclosure (Hermes pattern): inject only name + description catalog
+    // by default; LLM calls skill_view(name) to pull full content on demand.
+    // Set ctf: "all" to eagerly inject full content (legacy, token-heavy).
+    this.skillMode = skillConfig.ctf === "all" ? "all" : "catalog";
 
     if (skillConfig.ctf !== false) {
       registerCtfSkills(this.skillRegistry);
@@ -338,9 +343,23 @@ export class Agent {
         prompt += "\n\n## Skills (mandatory)\nIf a skill matches or is even partially relevant to your task, you MUST apply its workflow and techniques.\n";
         prompt += this.skillRegistry.loadAll();
       } else {
-        prompt += "\n\n## Skills (mandatory)\nIf a skill matches or is even partially relevant to your task, you MUST apply its workflow and techniques.\n";
-        prompt += this.skillRegistry.buildCatalog();
-        prompt += "\n\nWhen you identify a skill category that matches the challenge, apply the techniques described in that skill's content. You have full knowledge of all listed skills built into your training — use them proactively.\n";
+        prompt += "\n\n## Skills (mandatory)\n" +
+          "Before replying, scan the skill catalog below. If any skill matches or is even " +
+          "partially relevant to the user's request, you MUST call `skill_view(name)` to load " +
+          "its full instructions and follow them. Err on the side of loading — it is always " +
+          "better to have context you don't need than to miss critical steps, tool commands, " +
+          "or workflows that the skill encodes.\n" +
+          "Skills contain specialized knowledge (API calls, exploit techniques, analysis " +
+          "pipelines, user conventions) that outperform generic approaches. Do not rely on " +
+          "your training data for skill contents — the catalog only lists names and " +
+          "descriptions; the actual instructions live behind `skill_view`.\n" +
+          "If a skill is missing or wrong, fix it with `skill_manage(action='patch')`. " +
+          "After difficult tasks, offer to save your approach as a new skill with " +
+          "`skill_manage(action='create')`.\n\n" +
+          "<available_skills>\n" +
+          this.skillRegistry.buildCatalog() +
+          "\n</available_skills>\n\n" +
+          "Only proceed without loading a skill when genuinely none are relevant.\n";
       }
     }
 
@@ -391,6 +410,14 @@ export class Agent {
 
   private createTransport(llm: AgentConfig["llm"]): Transport {
     return createTransportFromConfig(llm);
+  }
+
+  /** Switch model at runtime — rebuilds transport with new model */
+  switchModel(newModel: string): void {
+    this.model = newModel;
+    this.contextWindow = getContextWindow(newModel);
+    this.llmConfig = { ...this.llmConfig, model: newModel };
+    this.transport = this.createTransport(this.llmConfig);
   }
 
   private get tools(): ToolDef[] | undefined {

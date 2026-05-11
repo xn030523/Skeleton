@@ -4,7 +4,7 @@ export const ctfAiMlSkill: SkillDef = {
   name: "ctf-ai-ml",
   description: "AI/ML challenges: adversarial examples, model extraction, prompt injection, membership inference, data poisoning, LoRA exploitation, LLM jailbreaking.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF AI/ML
 
 ## Key Techniques

@@ -49,12 +49,12 @@ export class SkillRegistry {
     this.userSkillDir = userSkillDir ?? path.join(os.homedir(), ".skeleton", "skills");
   }
 
-  /** Set external skill directories (from config.yaml skills.external_dirs) */
+  /** Set external skill directories */
   setExternalDirs(dirs: string[]): void {
     this.externalDirs = dirs.filter(d => fs.existsSync(d));
   }
 
-  /** Set disabled skill names (from config.yaml skills.disabled) */
+  /** Set disabled skill names */
   setDisabledSkills(names: string[]): void {
     this.disabledSkills = new Set(names.map(n => n.trim().toLowerCase()));
   }
@@ -119,8 +119,17 @@ export class SkillRegistry {
     return this.userSkillDir;
   }
 
-  /** Load skills from project, user, and external directories */
+  /** Load skills from project, user, and external directories.
+   *  Built-in (non-agentCreated) skills are preserved; disk-loaded skills
+   *  (agentCreated=true) are rebuilt from scratch so that on-disk deletions
+   *  propagate into memory — matches Hermes reload_skills() semantics. */
   loadFromDisk(): number {
+    // Drop stale disk-backed skills before rescanning so deletes propagate.
+    for (const [name, skill] of Array.from(this.skills.entries())) {
+      if (skill.agentCreated) this.skills.delete(name);
+    }
+    this.invalidateCache();
+
     let count = 0;
 
     // External directories (lowest priority)

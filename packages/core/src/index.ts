@@ -21,6 +21,8 @@ export { Logger, tailLog, filterLog, getLogDir } from "./logger/index.js";
 export type { LogLevel } from "./logger/index.js";
 export { loadConfig, loadTools } from "./config/index.js";
 export type { McpServerConfig } from "./config/index.js";
+export { readSimpleConfig, writeSimpleConfig, hasSimpleConfig, getSimpleConfigPath, getConfigValue, simpleConfigToLLM } from "./config/simple.js";
+export type { SimpleConfig } from "./config/simple.js";
 export { loadEnv, getSkeletonEnvPath, writeSkeletonEnv } from "./env.js";
 export { detectProxy, applyGlobalProxy, shouldBypassProxy } from "./proxy.js";
 export type { ProxyConfig } from "./proxy.js";

@@ -1,5 +1,5 @@
 /**
- * Tool output budget configuration — per-tool limits loaded from YAML/JSON.
+ * Tool output budget configuration — per-tool limits loaded from JSON config.
  * Merge priority: defaults < config file < environment variable overrides.
  */
 

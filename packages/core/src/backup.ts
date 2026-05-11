@@ -1,9 +1,9 @@
 /**
  * Backup / import — bundle ~/.skeleton/ contents into a portable tar.
  *
- * Includes: config.yaml, memories DB, sessions DB, skills, personalities,
+ * Includes: config.json, memories DB, sessions DB, skills, personalities,
  * snapshots, plugins (not plugin-data), goal state.
- * Excludes: .env (secrets — user must re-enter), logs, plugin-data cache.
+ * Excludes: logs, plugin-data cache.
  */
 
 import fs from "node:fs";
@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 const HOME_SKELETON = path.join(os.homedir(), ".skeleton");
 
 const INCLUDE_PATHS = [
-  "config.yaml",
+  "config.json",
   "memories.db",
   "memories.db-shm",
   "memories.db-wal",

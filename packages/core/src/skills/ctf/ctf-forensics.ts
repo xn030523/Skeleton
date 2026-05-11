@@ -4,7 +4,7 @@ export const ctfForensicsSkill: SkillDef = {
   name: "ctf-forensics",
   description: "Digital forensics: disk images, memory dumps, PCAP, steganography, event logs, Volatility, Windows registry, side-channel analysis, data recovery.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF Forensics
 
 ## Workflow

@@ -4,7 +4,7 @@ export const ctfReverseSkill: SkillDef = {
   name: "ctf-reverse",
   description: "Reverse engineering: analyze compiled, obfuscated, packed, or virtualized targets. Binaries, APKs, WASM, firmware, custom VMs, bytecode, anti-debug.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF Reverse Engineering
 
 ## Workflow

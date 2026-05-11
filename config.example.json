@@ -1,0 +1,33 @@
+{
+  "baseUrl": "https://api.fireworks.ai/inference/v1",
+  "apiKey": "your-api-key-here",
+  "model": "accounts/fireworks/models/glm-5p1",
+  "protocol": "openai",
+  "telegramToken": "your-telegram-bot-token",
+  "haiku": "accounts/fireworks/models/llama-v3p1-8b-instruct",
+  "opus": "accounts/fireworks/models/deepseek-v3",
+
+  "keys": {
+    "SKELETON_BRAVE_API_KEY": "your-brave-search-key",
+    "SKELETON_EXA_API_KEY": "your-exa-key",
+    "SKELETON_TAVILY_API_KEY": "your-tavily-key",
+    "SKELETON_FAL_API_KEY": "your-fal-image-gen-key",
+    "GROQ_API_KEY": "your-groq-key-for-stt",
+    "ELEVENLABS_API_KEY": "your-elevenlabs-tts-key"
+  },
+
+  "mcp": {
+    "my-custom-server": {
+      "command": "npx",
+      "args": ["-y", "my-mcp-server@latest"],
+      "env": {}
+    },
+    "local-ghidra": {
+      "command": "python3",
+      "args": ["bridge_mcp_ghidra.py"],
+      "env": {
+        "GHIDRA_MCP_PATH": "/opt/ghidra/mcp"
+      }
+    }
+  }
+}

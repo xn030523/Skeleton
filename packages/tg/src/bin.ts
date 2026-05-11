@@ -1,27 +1,28 @@
 import { Bot } from "grammy";
 import {
-  Agent, loadConfig, loadTools, loadEnv, Logger,
+  Agent, loadConfig, loadTools, Logger,
   MemoryStore, SessionDB, UserProfile, ProjectContext,
   CronStore, CronScheduler, HonchoUserModel,
   listBuiltinMcpServersByCategory, MCP_CATEGORIES,
   markdownToMDv2, escapeMDv2, filterThinkBlocks,
   chunkForTelegram, convertTablesToMDv2,
   applyGlobalProxy,
+  readSimpleConfig,
 } from "@skeleton/core";
 
-loadEnv();
 applyGlobalProxy().catch(() => { /* non-critical */ });
 const log = new Logger("tg");
 
-const TOKEN = process.env.SKELETON_TG_TOKEN ?? "";
+const simpleConfig = readSimpleConfig();
+const TOKEN = simpleConfig?.telegramToken ?? process.env.SKELETON_TG_TOKEN ?? "";
 if (!TOKEN) {
-  console.error("Set SKELETON_TG_TOKEN environment variable");
+  console.error("Set telegramToken in ~/.skeleton/config.json");
   process.exit(1);
 }
 
 const config = loadConfig();
 if (!config.llm.apiKey) {
-  console.error("Set SKELETON_API_KEY or create skeleton.yaml");
+  console.error("Create ~/.skeleton/config.json with baseUrl, apiKey, model");
   process.exit(1);
 }
 
@@ -615,7 +616,7 @@ bot.command("mcp", async (ctx) => {
     }
     if (servers.length > 5) lines.push(`  \\+${servers.length - 5} more`);
   }
-  lines.push("\\nEnable: skeleton\\.yaml or SKELETON\\_MCP\\_<NAME>\\=true");
+  lines.push("\\nEnable: /mcp enable <name> or SKELETON\\_MCP\\_<NAME>\\=true");
   await ctx.reply(lines.join("\n"), { parse_mode: "MarkdownV2" });
 });
 

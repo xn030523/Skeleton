@@ -207,12 +207,10 @@ export class CredentialPool {
 }
 
 /**
- * Build a CredentialPool from YAML config.
+ * Build a CredentialPool from config.
  *
  * Supports `apiKeys` array in llm config:
- *   llm:
- *     apiKeys: [sk-xxx, sk-yyy]
- *     credentialStrategy: round_robin
+ *   { "apiKeys": ["sk-xxx", "sk-yyy"], "credentialStrategy": "round_robin" }
  *
  * Falls back to single apiKey if apiKeys is not set.
  */

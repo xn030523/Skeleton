@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { parse as parseYaml } from "yaml";
 import type { AgentConfig, LLMConfig, Protocol, ReasoningEffort, ToolDef } from "../types.js";
 import { builtInTools } from "../tools/index.js";
 import type { SkillConfig } from "../skills/index.js";
@@ -11,6 +10,7 @@ import { UserProfile } from "../memory/user-profile.js";
 import { CronStore } from "../cron/store.js";
 import { findProvider, resolveProviderConfig } from "../providers/registry.js";
 import "../providers/profiles.js";
+import { readSimpleConfig, simpleConfigToLLM, getConfigValue } from "./simple.js";
 
 export interface McpServerConfig {
   command?: string;
@@ -23,31 +23,42 @@ export interface McpServerConfig {
 }
 
 export function loadConfig(configPath?: string): AgentConfig {
-  const yamlConfig = loadYaml(configPath);
-
-  // Config structure validation — catch malformed YAML at startup
-  const validationErrors = validateConfigStructure(yamlConfig);
-  if (validationErrors.length > 0) {
-    console.warn(`⚠️  Config validation warnings:`);
-    for (const err of validationErrors) console.warn(`   - ${err}`);
+  // Simple JSON config (~/.skeleton/config.json) — the only config most users need
+  const simple = readSimpleConfig();
+  if (simple) {
+    const llm = simpleConfigToLLM(simple);
+    // Read user-defined MCP servers from config.json
+    const userMcp = (simple as any).mcp as Record<string, McpServerConfig> | undefined;
+    return {
+      llm: llm as any,
+      fallback: undefined,
+      maxTurns: 20,
+      systemPrompt: defaultPrompt(),
+      tools: [],
+      skills: { ctf: true },
+      compression: undefined,
+      behavior: undefined,
+      toolOutput: undefined,
+      fileRead: undefined,
+      auxiliary: undefined,
+      _rawMcpConfig: userMcp ? { servers: userMcp } : undefined,
+    } as any;
   }
 
-  const llm = resolveLLM(yamlConfig.llm);
-  const fallback = yamlConfig.fallback ? resolveLLM(yamlConfig.fallback) : undefined;
+  // Fallback: no config.json found, try to resolve from env/defaults
+  const llm = resolveLLM({});
 
   return {
     llm,
-    fallback,
-    maxTurns: yamlConfig.agent?.maxTurns ?? 20,
-    systemPrompt: yamlConfig.agent?.systemPrompt ?? defaultPrompt(),
-    skills: resolveSkillConfig(yamlConfig.skills),
-    compression: yamlConfig.compression,
-    behavior: yamlConfig.behavior ?? yamlConfig.agent?.behavior,
-    toolOutput: yamlConfig.toolOutput,
-    fileRead: yamlConfig.fileRead,
-    auxiliary: yamlConfig.auxiliary,
-    _rawToolConfig: yamlConfig.tools,
-    _rawMcpConfig: yamlConfig.mcp,
+    fallback: undefined,
+    maxTurns: 20,
+    systemPrompt: defaultPrompt(),
+    skills: resolveSkillConfig(undefined),
+    compression: undefined,
+    behavior: undefined,
+    toolOutput: undefined,
+    fileRead: undefined,
+    auxiliary: undefined,
   } as AgentConfig & { _rawToolConfig?: RawToolConfig; _rawMcpConfig?: RawMcpConfig; skills?: SkillConfig };
 }
 
@@ -115,7 +126,7 @@ export async function loadTools(
 
 function resolveLLM(partial: Partial<LLMConfig> = {}): LLMConfig {
   // 1. Provider-based resolution: if provider name specified, resolve from profile
-  const providerName = partial.provider ?? env("SKELETON_PROVIDER");
+  const providerName = partial.provider ?? (getConfigValue("SKELETON_PROVIDER") || undefined);
   if (providerName) {
     const profile = findProvider(providerName);
     if (profile) {
@@ -124,13 +135,13 @@ function resolveLLM(partial: Partial<LLMConfig> = {}): LLMConfig {
     console.warn(`Unknown provider "${providerName}", falling back to manual config`);
   }
 
-  // 2. Legacy resolution: SKELETON_PROTOCOL + SKELETON_API_KEY + SKELETON_BASE_URL
-  const protocol: Protocol = partial.protocol ?? (env("SKELETON_PROTOCOL") as Protocol) ?? "openai";
-  const apiKey = partial.apiKey ?? env("SKELETON_API_KEY") ?? "";
-  const baseUrl = partial.baseUrl ?? env("SKELETON_BASE_URL") ?? defaultBaseUrl(protocol);
-  const model = partial.model ?? env("SKELETON_MODEL") ?? defaultModel(protocol);
+  // 2. Legacy resolution
+  const protocol: Protocol = partial.protocol ?? (getConfigValue("SKELETON_PROTOCOL") as Protocol || "openai");
+  const apiKey = partial.apiKey ?? (getConfigValue("SKELETON_API_KEY") || "");
+  const baseUrl = partial.baseUrl ?? (getConfigValue("SKELETON_BASE_URL") || defaultBaseUrl(protocol));
+  const model = partial.model ?? (getConfigValue("SKELETON_MODEL") || defaultModel(protocol));
 
-  const reasoningEffort = partial.reasoningEffort ?? (env("SKELETON_REASONING_EFFORT") as ReasoningEffort | undefined) ?? undefined;
+  const reasoningEffort = partial.reasoningEffort ?? (getConfigValue("SKELETON_REASONING_EFFORT") as ReasoningEffort || undefined);
 
   return {
     protocol,
@@ -197,88 +208,4 @@ interface RawConfig {
   toolOutput?: AgentConfig["toolOutput"];
   fileRead?: AgentConfig["fileRead"];
   auxiliary?: AgentConfig["auxiliary"];
-}
-
-function loadYaml(configPath?: string): RawConfig {
-  const searchPaths = [
-    configPath,
-    path.join(process.cwd(), "skeleton.yaml"),
-    path.join(process.cwd(), "skeleton.yml"),
-    path.join(os.homedir(), ".skeleton", "config.yaml"),
-  ].filter(Boolean) as string[];
-
-  for (const p of searchPaths) {
-    if (fs.existsSync(p)) {
-      const raw = fs.readFileSync(p, "utf-8");
-      // Substitute ${VAR} references with env var values (Hermes-style)
-      const substituted = substituteEnvVars(raw);
-      return parseYaml(substituted) as RawConfig;
-    }
-  }
-  return {};
-}
-
-/**
- * Replace ${VAR_NAME} patterns in YAML text with environment variable values.
- * Also supports ${VAR_NAME:-default} syntax for default values.
- *
- * This matches Hermes's config.yaml ${VAR} substitution pattern.
- */
-function substituteEnvVars(text: string): string {
-  // Match ${VAR} or ${VAR:-default}
-  return text.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_match, varName, defaultVal) => {
-    const envVal = process.env[varName];
-    if (envVal !== undefined && envVal !== "") return envVal;
-    if (defaultVal !== undefined) return defaultVal;
-    return ""; // Unset var with no default → empty string
-  });
-}
-
-const VALID_TOP_KEYS = new Set(["llm", "fallback", "agent", "tools", "mcp", "skills", "compression", "behavior", "toolOutput", "fileRead", "auxiliary", "credentials"]);
-const VALID_LLM_KEYS = new Set(["protocol", "apiKey", "baseUrl", "model", "provider", "maxTokens", "temperature", "reasoningEffort", "apiKeys", "credentialStrategy"]);
-const VALID_PROTOCOLS = new Set(["openai", "anthropic"]);
-
-function validateConfigStructure(config: RawConfig): string[] {
-  const errors: string[] = [];
-
-  for (const key of Object.keys(config)) {
-    if (!VALID_TOP_KEYS.has(key)) {
-      errors.push(`Unknown top-level key "${key}" — did you mean one of: ${[...VALID_TOP_KEYS].join(", ")}?`);
-    }
-  }
-
-  if (config.llm) {
-    for (const key of Object.keys(config.llm)) {
-      if (!VALID_LLM_KEYS.has(key)) {
-        errors.push(`Unknown key "llm.${key}" — valid keys: ${[...VALID_LLM_KEYS].join(", ")}`);
-      }
-    }
-    if (config.llm.protocol && !VALID_PROTOCOLS.has(config.llm.protocol)) {
-      errors.push(`Invalid llm.protocol "${config.llm.protocol}" — must be "openai" or "anthropic"`);
-    }
-    if (config.llm.maxTokens && (typeof config.llm.maxTokens !== "number" || config.llm.maxTokens < 1)) {
-      errors.push(`llm.maxTokens must be a positive number, got: ${config.llm.maxTokens}`);
-    }
-    if (config.llm.temperature !== undefined && (typeof config.llm.temperature !== "number" || config.llm.temperature < 0 || config.llm.temperature > 2)) {
-      errors.push(`llm.temperature must be 0-2, got: ${config.llm.temperature}`);
-    }
-  }
-
-  if (config.agent) {
-    if (config.agent.maxTurns !== undefined && (typeof config.agent.maxTurns !== "number" || config.agent.maxTurns < 1)) {
-      errors.push(`agent.maxTurns must be a positive number, got: ${config.agent.maxTurns}`);
-    }
-  }
-
-  if (config.compression) {
-    const c = config.compression as Record<string, unknown>;
-    if (c.threshold !== undefined && (typeof c.threshold !== "number" || c.threshold < 0 || c.threshold > 1)) {
-      errors.push(`compression.threshold must be 0.0-1.0, got: ${c.threshold}`);
-    }
-    if (c.targetRatio !== undefined && (typeof c.targetRatio !== "number" || c.targetRatio < 0 || c.targetRatio > 1)) {
-      errors.push(`compression.targetRatio must be 0.0-1.0, got: ${c.targetRatio}`);
-    }
-  }
-
-  return errors;
 }

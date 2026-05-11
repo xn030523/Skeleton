@@ -4,7 +4,7 @@ export const ctfCryptoSkill: SkillDef = {
   name: "ctf-crypto",
   description: "Cryptography attacks: RSA, AES, ECC, lattice/LWE, PRNG, ZKP, classical ciphers. Number theory, Coppersmith, padding oracle, GCM attacks.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF Cryptography
 
 ## Workflow

@@ -4,7 +4,7 @@ export const ctfPwnSkill: SkillDef = {
   name: "ctf-pwn",
   description: "Binary exploitation: buffer overflow, format string, heap, ROP, kernel, seccomp bypass, sandbox escape. Turn memory corruption into code execution.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF Binary Exploitation (Pwn)
 
 ## Workflow

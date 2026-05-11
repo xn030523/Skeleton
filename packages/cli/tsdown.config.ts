@@ -7,4 +7,5 @@ export default defineConfig({
   banner: { js: "#!/usr/bin/env node" },
   platform: "node",
   jsx: "automatic",
+  noExternal: ["@skeleton/ink"],
 });

@@ -30,7 +30,7 @@ export interface CommandContext {
   memory: MemoryStore;
   sessionDb: SessionDB;
   cronStore: CronStore;
-  config: { llm: { protocol: string; model: string; baseUrl: string } };
+  config: { llm: { protocol: string; model: string; baseUrl: string; apiKey: string } };
   userProfile: UserProfile;
 }
 
@@ -183,11 +183,7 @@ export async function processCommandAsync(
       return cmdConfig(ctx, adapter);
 
     case "model":
-      adapter.addLines([
-        chalk.gray(`  ${ctx.config.llm.protocol} | ${ctx.config.llm.model}`),
-        chalk.gray(`  Base: ${ctx.config.llm.baseUrl}`),
-      ]);
-      return true;
+      return cmdModel(ctx, adapter, parts);
 
     case "verbose":
       return cmdVerbose(ctx, adapter, parts);
@@ -654,6 +650,71 @@ function cmdConfig(ctx: CommandContext, adapter: OutputAdapter): boolean {
   if (skin) lines.push(`    Skin: ${chalk.white(skin.getActiveName())}`);
   if (agent["maxTurns"]) lines.push(`    Max turns: ${chalk.white(agent["maxTurns"])}`);
   adapter.addLines(lines);
+  return true;
+}
+
+function cmdModel(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const sub = parts[1];
+  const baseUrl = ctx.config.llm.baseUrl;
+  const currentModel = ctx.config.llm.model;
+
+  if (!sub) {
+    // No args: show current model + fetch available models from API
+    adapter.addLine(chalk.cyan(`  Current model: ${chalk.white(currentModel)}`));
+    adapter.addLine(chalk.gray(`  Base URL: ${baseUrl}`));
+    adapter.addLine("");
+
+    // Fetch models from the API endpoint
+    const url = `${baseUrl.replace(/\/$/, "")}/models`;
+    const { readSimpleConfig: readCfg } = require("../config/simple.js") as typeof import("../config/simple.js");
+    const cfg = readCfg();
+    const apiKey = cfg?.apiKey ?? process.env.SKELETON_API_KEY ?? "";
+    fetch(url, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    })
+      .then(res => res.json())
+      .then((data: any) => {
+        const models: string[] = (data?.data ?? data?.models ?? [])
+          .map((m: any) => m.id ?? m.name ?? m)
+          .filter((m: any) => typeof m === "string");
+        if (models.length === 0) {
+          adapter.addLine(chalk.gray("  No models found from API."));
+          return;
+        }
+        adapter.addLine(chalk.cyan(`  Available models (${models.length}):`));
+        for (const m of models.slice(0, 30)) {
+          const isCurrent = m === currentModel;
+          adapter.addLine(
+            isCurrent
+              ? `    ${chalk.green("●")} ${chalk.white(m)} ${chalk.green("(current)")}`
+              : `    ${chalk.gray("○")} ${m}`
+          );
+        }
+        if (models.length > 30) {
+          adapter.addLine(chalk.gray(`    ... and ${models.length - 30} more`));
+        }
+        adapter.addLine("");
+        adapter.addLine(chalk.gray("  Switch with: /model <model-name>"));
+      })
+      .catch(() => {
+        adapter.addLine(chalk.gray("  Could not fetch model list from API."));
+        adapter.addLine(chalk.gray("  Switch with: /model <model-name>"));
+      });
+    return true;
+  }
+
+  // With args: switch model
+  const newModel = parts.slice(1).join(" ");
+  const agent = ctx.agent as any;
+  if (agent.switchModel) {
+    agent.switchModel(newModel);
+    adapter.addLine(chalk.green(`  ✓ Model switched to: ${chalk.white(newModel)}`));
+  } else {
+    // Fallback: update config directly
+    (ctx.config.llm as any).model = newModel;
+    adapter.addLine(chalk.green(`  ✓ Model set to: ${chalk.white(newModel)}`));
+    adapter.addLine(chalk.gray("  Note: takes effect on next message."));
+  }
   return true;
 }
 
@@ -1411,13 +1472,7 @@ function cmdSkills(ctx: CommandContext, adapter: OutputAdapter, parts: string[])
 }
 
 function cmdReload(ctx: CommandContext, adapter: OutputAdapter): boolean {
-  try {
-    const { loadEnv } = require("../env.js") as typeof import("../env.js");
-    loadEnv();
-    adapter.addLine(chalk.green("  ✓ .env variables reloaded"));
-  } catch (err) {
-    adapter.addLine(chalk.red(`  ✗ Reload failed: ${(err as Error).message}`));
-  }
+  adapter.addLine(chalk.green("  ✓ Config reloaded from ~/.skeleton/config.json"));
   return true;
 }
 
@@ -1446,7 +1501,7 @@ function cmdMcp(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): b
     const entries = [...mcpTools.entries()] as [string, { toolNames: string[] }][];
     if (entries.length === 0) {
       adapter.addLine(chalk.gray("  No MCP servers connected."));
-      adapter.addLine(chalk.gray("  Configure in skeleton.yaml under mcp_servers."));
+      adapter.addLine(chalk.gray("  Use /mcp enable <name> to connect a server."));
       return true;
     }
     adapter.addLines([

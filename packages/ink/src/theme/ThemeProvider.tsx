@@ -1,4 +1,5 @@
-import { feature } from 'bun:bundle';
+// bun:bundle shim for Node.js — feature() always returns false (no dead code elimination)
+const feature = (_name: string): boolean => false;
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import useStdin from '../hooks/use-stdin.js';
 import { getSystemThemeName, type SystemTheme } from './systemTheme.js';

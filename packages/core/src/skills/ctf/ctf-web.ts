@@ -4,7 +4,7 @@ export const ctfWebSkill: SkillDef = {
   name: "ctf-web",
   description: "Web exploitation: XSS, SQLi, SSTI, SSRF, JWT, file upload, deserialization, prototype pollution, OAuth/SAML, request smuggling.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF Web Exploitation
 
 ## First-Pass Workflow

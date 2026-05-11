@@ -4,7 +4,7 @@ export const ctfOsintSkill: SkillDef = {
   name: "ctf-osint",
   description: "Open source intelligence: social media, geolocation, DNS records, username enumeration, reverse image search, Google dorking, Wayback Machine.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF OSINT
 
 ## Key Techniques

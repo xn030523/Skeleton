@@ -13,7 +13,7 @@
  *
  * URL source:
  *   1. SKELETON_MODEL_CATALOG_URL env
- *   2. config.yaml `modelCatalog.url`
+ *   2. Default: disabled (empty string)
  *   3. default: https://raw.githubusercontent.com/your-org/skeleton/main/model-catalog.json
  */
 

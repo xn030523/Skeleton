@@ -24,7 +24,7 @@ Use any model — 34 pre-configured providers covering [OpenAI](https://openai.c
 <tr><td><b>Lives where you do</b></td><td>CLI and Telegram gateway — same memory, same sessions, same skills. One SQLite file backs both. Set <code>SKELETON_TG_TOKEN</code> and you're live on Telegram in one command. Grammy-powered bot with whitelist, group mode (off / mention / all), and emoji reactions.</td></tr>
 <tr><td><b>Skills &amp; CTF library</b></td><td>Skill Registry with hub sync, lifecycle tracking, curator (dedupe / orphan cleanup), guard (risk scanning), provenance tracking, and usage counters. Bundled CTF library: a <code>solve-challenge</code> orchestrator plus 16 category workflows (pwn, web, crypto, reverse, forensics, misc, osint, malware, ai-ml, js-deobfuscation, wasm-reverse, api-reverse, bundle-analysis, chrome-extension-audit, anti-bot-bypass, writeup).</td></tr>
 <tr><td><b>Delegates and parallelizes</b></td><td>Sub-agent spawning (serial and parallel). Goals / Ralph Loop for long-running objectives. Mixture-of-Agents (MoA) and parallel tool calls (PTC). Auxiliary model router splits work across specialist endpoints (compression, vision, web-extract, title, session-search, skills-hub, MCP, judge, error-classifier).</td></tr>
-<tr><td><b>MCP host, 50+ tools pre-wired</b></td><td>Built-in MCP host with OAuth support. 50+ curated server definitions covering Ghidra, IDA Pro, radare2, Frida, JADX, x64dbg, Cheat Engine, YARA, capa, binwalk, VirusTotal, nmap, nuclei, sqlmap, ffuf, hashcat, BloodHound, Burp, Semgrep, Trivy, Prowler, Playwright, Chrome DevTools, Firefox DevTools, Maigret, Shodan, jshookmcp (387 browser tools), and more. Enable any of them with a yaml key or env flag.</td></tr>
+<tr><td><b>MCP host, 50+ tools pre-wired</b></td><td>Built-in MCP host with OAuth support. 50+ curated server definitions covering Ghidra, IDA Pro, radare2, Frida, JADX, x64dbg, Cheat Engine, YARA, capa, binwalk, VirusTotal, nmap, nuclei, sqlmap, ffuf, hashcat, BloodHound, Burp, Semgrep, Trivy, Prowler, Playwright, Chrome DevTools, Firefox DevTools, Maigret, Shodan, jshookmcp (387 browser tools), and more. Enable any of them with a config key or env flag.</td></tr>
 <tr><td><b>Automations</b></td><td>Cron scheduler with its own parser, store, and delivery tools. Background task manager (spawn / list / kill / get). Hook registry with 7 events (pre/post tool, pre/post LLM, session start/stop, on error). Plugin system with lifecycle and context injection.</td></tr>
 <tr><td><b>Runs beyond your laptop</b></td><td>Four sandbox backends: Daytona, Modal, Singularity, Vercel Sandbox. Execute commands, write files, and keep agent state hibernating between sessions. Includes checkpoint manager (git-backed history in <code>.skeleton/checkpoints/</code>) and snapshot manager (create / restore / list / prune).</td></tr>
 <tr><td><b>Research-ready</b></td><td>Trajectory compressor, batch runner, RL trainer with reward configs, 8 model-specific tool-call parsers (Hermes, Mistral, Qwen, DeepSeek V3/V3.1, LLaMA, GLM, Kimi K2) for fine-tuning tool-using models.</td></tr>
@@ -42,24 +42,22 @@ pnpm install
 
 > **Prerequisites:** [Node.js](https://nodejs.org) >= 22 and [pnpm](https://pnpm.io) 10+ (or use `npx pnpm`).
 
-Create `.env` in the project root:
+Create `~/.skeleton/config.json`:
 
-```bash
-SKELETON_PROTOCOL=anthropic
-SKELETON_API_KEY=sk-ant-...
-SKELETON_BASE_URL=https://api.anthropic.com
-SKELETON_MODEL=claude-sonnet-4-5-20250514
+```json
+{
+  "baseUrl": "https://api.anthropic.com",
+  "apiKey": "sk-ant-...",
+  "model": "claude-sonnet-4-5-20250514",
+  "provider": "anthropic"
+}
 ```
 
-Or use `skeleton.yaml` / `~/.skeleton/config.yaml` with provider-based configuration:
+Or use environment variables as override:
 
-```yaml
-llm:
-  provider: deepseek        # auto-resolves baseUrl, env var, default model
-  model: deepseek-chat
-fallback:
-  provider: anthropic       # used if primary fails
-  model: claude-sonnet-4-20250514
+```bash
+SKELETON_PROVIDER=deepseek
+SKELETON_MODEL=deepseek-chat
 ```
 
 Start chatting:
@@ -271,7 +269,7 @@ Binaries handled purely in Node with no external deps: `pe-library` for PE, `elf
 
 ## MCP Integration
 
-Built-in MCP host with 50+ curated server definitions. All disabled by default — enable individually in `skeleton.yaml` or with an env flag.
+Built-in MCP host with 50+ curated server definitions. All disabled by default — enable individually in `config.json` or with an env flag.
 
 | Category | Example servers |
 |---|---|
@@ -286,20 +284,46 @@ Built-in MCP host with 50+ curated server definitions. All disabled by default �
 | **Browser instrumentation** | `jshook` (387 tools), `playwright-mcp`, `chrome-devtools-mcp`, `firefox-devtools-mcp`, `rc-devtools-mcp`, `cdp-tools-mcp`, `flowlens-mcp` |
 | **Web reversing** | `web-reversing-mcp`, `mitmproxy-mcp`, `api-tester-mcp` |
 
-Full list and per-server config in [`skeleton.yaml`](skeleton.yaml). OAuth flow supported via `buildMcpOAuth()`. Malware scanning for npm/pip packages before install via `checkPackageForMalware()`.
+Full list and per-server config in [`config.example.json`](config.example.json). OAuth flow supported via `buildMcpOAuth()`. Malware scanning for npm/pip packages before install via `checkPackageForMalware()`.
 
 ---
 
 ## Configuration
 
-### Environment Variables
+### JSON Config
+
+Create `~/.skeleton/config.json` (or run `skeleton setup`):
+
+```json
+{
+  "baseUrl": "https://api.deepseek.com",
+  "apiKey": "sk-...",
+  "model": "deepseek-chat",
+  "provider": "deepseek",
+  "fallback": {
+    "provider": "anthropic",
+    "baseUrl": "https://api.anthropic.com",
+    "apiKey": "sk-ant-...",
+    "model": "claude-sonnet-4-20250514"
+  },
+  "mcp": {
+    "ghidra-mcp": {
+      "env": { "GHIDRA_MCP_PATH": "/path/to/GhidraMCP" }
+    }
+  }
+}
+```
+
+See [`config.example.json`](config.example.json) for a full annotated example with all MCP servers.
+
+### Environment Variables (override)
 
 | Variable | Required | Description |
 |---|---|---|
-| `SKELETON_PROTOCOL` | Yes | `openai` or `anthropic` |
-| `SKELETON_API_KEY` | Yes | Your API key |
-| `SKELETON_BASE_URL` | Yes | Base URL — everything before `/v1` |
-| `SKELETON_MODEL` | Yes | Model name |
+| `SKELETON_PROVIDER` | No | Provider name (overrides config.json) |
+| `SKELETON_MODEL` | No | Model name (overrides config.json) |
+| `SKELETON_API_KEY` | No | API key (overrides config.json) |
+| `SKELETON_BASE_URL` | No | Base URL (overrides config.json) |
 | `SKELETON_TG_TOKEN` | TG only | Telegram bot token from [@BotFather](https://t.me/BotFather) |
 | `SKELETON_TG_ALLOWED_USERS` | TG only | `*` (default) or comma-separated user IDs |
 | `SKELETON_TG_GROUP_MODE` | TG only | `off` / `mention` (default) / `all` |
@@ -307,77 +331,28 @@ Full list and per-server config in [`skeleton.yaml`](skeleton.yaml). OAuth flow 
 | `SKELETON_CTF_SKILLS` | No | `true` (default) / `false` / `auto` |
 | `SKELETON_JSHOOK` | No | Auto-enable jshookmcp browser tools |
 
-See [`.env.example`](.env.example) for the full list.
-
-### YAML Config
-
-Create `skeleton.yaml` in your project, or `~/.skeleton/config.yaml` for user-level defaults:
-
-```yaml
-llm:
-  provider: deepseek
-  model: deepseek-chat
-  # maxTokens: 4096
-  # temperature: 0.3
-
-fallback:
-  provider: anthropic
-  model: claude-sonnet-4-20250514
-
-agent:
-  maxTurns: 90
-  systemPrompt: "You are Skeleton, a reverse engineering AI assistant."
-
-compression:
-  enabled: true
-  threshold: 0.50        # compress when 50% of context used
-  targetRatio: 0.20      # compress down to 20% of threshold
-  protectLastN: 20       # always keep most recent N messages
-  toolOutputThreshold: 2000
-  toolOutputHead: 800
-  toolOutputTail: 400
-
-tools:
-  builtin: true
-  # builtinList: ["identify", "hexdump", "strings"]
-
-skills:
-  ctf: true              # enable CTF library
-
-mcp:
-  servers:
-    ghidra-mcp:
-      env:
-        GHIDRA_MCP_PATH: "/path/to/GhidraMCP"
-```
-
-Values support `${VAR}` substitution — see [`config.example.yaml`](config.example.yaml) for a full annotated example with all 34 providers and all 50+ MCP servers.
-
 ### Credential Pool
 
 Rotate across multiple keys with `round-robin` / `random` / `failover`:
 
-```yaml
-credentials:
-  strategy: round-robin
-  pool:
-    - apiKey: sk-ant-xxx
-    - apiKey: sk-ant-yyy
-    - apiKey: sk-ant-zzz
+```json
+{
+  "apiKeys": ["sk-ant-xxx", "sk-ant-yyy", "sk-ant-zzz"],
+  "credentialStrategy": "round_robin"
+}
 ```
 
 ### Auxiliary Models
 
 Route specific tasks to cheaper/faster models — compression, vision, web extraction, title generation, session search, skills hub, MCP, judge, error classification:
 
-```yaml
-auxiliary:
-  compression:
-    provider: deepseek
-    model: deepseek-chat
-  vision:
-    provider: openai
-    model: gpt-4o-mini
+```json
+{
+  "auxiliary": {
+    "compression": { "provider": "deepseek", "model": "deepseek-chat" },
+    "vision": { "provider": "openai", "model": "gpt-4o-mini" }
+  }
+}
 ```
 
 ---

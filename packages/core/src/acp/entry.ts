@@ -26,11 +26,7 @@ function setupLogging(): void {
 export function runAcpServer(): void {
   setupLogging();
 
-  // Load env from ~/.skeleton/.env
-  try {
-    const { loadEnv } = require("../env.js");
-    loadEnv();
-  } catch { /* env loading is optional */ }
+  // Config loaded from ~/.skeleton/config.json (no .env needed)
 
   process.stderr.write("Starting skeleton-agent ACP adapter\n");
 

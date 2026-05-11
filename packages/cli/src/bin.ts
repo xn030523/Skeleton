@@ -1,5 +1,5 @@
 import {
-  Agent, loadConfig, loadTools, loadEnv, Logger,
+  Agent, loadConfig, loadTools, Logger,
   MemoryStore, SessionDB, UserProfile, ProjectContext,
   CronStore, CronScheduler, ApprovalSystem,
   HonchoUserModel, generateMcpHelpText, listBuiltinMcpServersByCategory, MCP_CATEGORIES,
@@ -16,7 +16,6 @@ import {
   startSpinner, stopSpinner, CLEAR,
 } from "./theme.js";
 
-loadEnv();
 // Apply system proxy (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/SKELETON_PROXY) — non-blocking
 applyGlobalProxy().catch(() => { /* non-critical */ });
 const log = new Logger("cli");
@@ -55,8 +54,8 @@ Commands:
   /profile            Show user profile
 
 Configuration:
-  ~/.skeleton/config.yaml   Settings (provider, model, mcp, etc.)
-  ~/.skeleton/.env          Secrets (API keys)
+  ~/.skeleton/config.json   Settings (baseUrl, apiKey, model, provider, mcp)
+  ~/.skeleton/.env          Legacy secrets fallback
 
   Quick start:
     skeleton setup          Pick provider → enter API key → done
@@ -98,8 +97,8 @@ Legacy (still works):
   if (!config.llm.apiKey && needsApiKey) {
     log.error("No API key configured");
     const hint = provider
-      ? `Set ${provider.apiKeyEnvVars[0]} in ~/.skeleton/.env or as env var`
-      : "Set SKELETON_API_KEY or run `skeleton setup`";
+      ? `Set ${provider.apiKeyEnvVars[0]} in ~/.skeleton/config.json`
+      : "Create ~/.skeleton/config.json or run `skeleton setup`";
     console.log(chalk.yellow(`No API key. ${hint}`));
     process.exit(1);
   }
@@ -175,10 +174,7 @@ Legacy (still works):
   let agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
   agent.setMcpClients(mcpClients, mcpServerToolMap);
 
-  // Print header — logo + model info
-  console.log("");
-  console.log(renderHeader(config.llm.model, process.cwd()));
-  console.log(chalk.gray(`  ${tools.length} tools · ${mcpClients.length} MCP`));
+  // Logo is rendered inside the TUI (AlternateScreen clears primary buffer)
   console.log("");
 
   // Check if raw mode (ink) is supported — requires a real TTY

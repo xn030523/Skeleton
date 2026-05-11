@@ -86,10 +86,10 @@ export class SnapshotManager {
       }
     }
 
-    // Save config.yaml snapshot if exists
-    const configPath = path.join(SKELETON_DIR, "config.yaml");
+    // Save config.json snapshot if exists
+    const configPath = path.join(SKELETON_DIR, "config.json");
     if (fs.existsSync(configPath)) {
-      fs.copyFileSync(configPath, path.join(snapDir, "config.yaml"));
+      fs.copyFileSync(configPath, path.join(snapDir, "config.json"));
     }
 
     return meta;

@@ -14,8 +14,8 @@ export { resolveCommand, isCommandAvailable, checkCommandAvailability } from "./
  * Build merged MCP servers config.
  *
  * Built-in servers are OFF by default. They activate when:
- *   1. User lists the server name in skeleton.yaml → mcp.servers.<name>
- *      (user config takes priority, enables + allows override)
+ *   1. User runs /mcp enable <name>
+ *      (checks platform, env, command availability, then connects)
  *   2. User sets the server's envEnable variable to "true"
  *      (e.g., SKELETON_MCP_GHIDRA=true)
  *
@@ -119,7 +119,7 @@ export function generateMcpHelpText(): string {
   }
 
   lines.push("Enable via:");
-  lines.push("  1. skeleton.yaml → mcp.servers.<name>: { env: { KEY: val } }");
+  lines.push("  1. /mcp enable <name>");
   lines.push("  2. Environment → SKELETON_MCP_<NAME>=true");
 
   return lines.join("\n");

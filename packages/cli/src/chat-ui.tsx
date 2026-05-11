@@ -1,20 +1,26 @@
 /**
- * Skeleton CLI — ink-based interactive chat with fixed input area.
+ * Skeleton CLI — fullscreen TUI with ScrollBox + fixed input.
  *
- * Layout (inspired by Hermes prompt_toolkit approach):
- *   ┌─ output area (scrollable) ─────────────────┐
- *   │  ◆ Skeleton                                 │
- *   │  AI response text...                        │
- *   │    ┊ tool_name {"arg":"val"}                 │
- *   │    ┊ ✓ result preview                        │
- *   ├──────────────────────────────────────────────┤
- *   │ ❯ user types here_                           │
- *   └──────────────────────────────────────────────┘
+ * Architecture (Claude Code style):
+ *   AlternateScreen (fixed terminal height)
+ *   ├── ScrollBox (messages area, scrollable, flexGrow=1)
+ *   │   ├── Logo header
+ *   │   ├── Message rows (⎿ connector)
+ *   │   ├── Streaming text preview
+ *   │   └── Spinner
+ *   └── Bottom (fixed, flexShrink=0)
+ *       ├── Command suggestions
+ *       └── Input prompt (> )
  */
 
-import React, { useState, useCallback, useRef, useEffect } from "react";
-import { wrappedRender as render, Box, Text, useInput, useApp, AlternateScreen, ScrollBox } from "@skeleton/ink";
-import type { ScrollBoxHandle } from "@skeleton/ink";
+import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import {
+  wrappedRender as render,
+  Box,
+  Text,
+  useInput,
+  useApp,
+} from "@skeleton/ink";
 import chalk from "chalk";
 import type { Agent, MemoryStore, UserProfile, SessionDB, CronStore, CommandContext } from "@skeleton/core";
 import {
@@ -37,8 +43,13 @@ interface ChatUIProps {
   userProfile: UserProfile;
   sessionDb: SessionDB;
   cronStore: CronStore;
-  config: { llm: { protocol: string; model: string; baseUrl: string } };
+  config: { llm: { protocol: string; model: string; baseUrl: string; apiKey: string } };
   onQuit: () => Promise<void>;
+}
+
+interface OutputLine {
+  id: number;
+  text: string;
 }
 
 export function ChatUI({
@@ -48,84 +59,68 @@ export function ChatUI({
 }: ChatUIProps) {
   const { exit } = useApp();
   const [input, setInput] = useState("");
-  // Append-only log: Ink's <Static> requires items that only grow, never
-  // replaced or truncated. Each entry keeps a monotonic id so React keys
-  // are stable across renders (claude-code pattern).
-  const [output, setOutput] = useState<{ id: number; line: string }[]>([]);
-  const outputSeqRef = useRef(0);
+  const [lines, setLines] = useState<OutputLine[]>([]);
+  const lineSeq = useRef(0);
   const [streaming, setStreaming] = useState(false);
   const [streamText, setStreamText] = useState("");
   const [thinking, setThinking] = useState(false);
-  const [ctxProgress, setCtxProgress] = useState<{ usedTokens: number; contextWindow: number; percent: number } | null>(null);
-  const lastToolNameRef = useRef("");
-  const isProcessing = useRef(false);
+  const [selectedCmd, setSelectedCmd] = useState(0);
   const [pickerItems, setPickerItems] = useState<PickerItem[] | null>(null);
+  const [modelPickerItems, setModelPickerItems] = useState<PickerItem[] | null>(null);
+  const [ctxProgress, setCtxProgress] = useState<{ usedTokens: number; contextWindow: number; percent: number } | null>(null);
+  const isProcessing = useRef(false);
+  const lastToolNameRef = useRef("");
 
-  const addLine = useCallback((line: string) => {
-    setOutput(prev => [...prev, { id: ++outputSeqRef.current, line }]);
+  // Append a line to output
+  const addLine = useCallback((text: string) => {
+    setLines(prev => [...prev, { id: ++lineSeq.current, text }]);
   }, []);
 
-  const addLines = useCallback((lines: string[]) => {
-    setOutput(prev => {
-      const next = prev.slice();
-      for (const line of lines) next.push({ id: ++outputSeqRef.current, line });
+  const addLines = useCallback((texts: string[]) => {
+    setLines(prev => {
+      const next = [...prev];
+      for (const t of texts) next.push({ id: ++lineSeq.current, text: t });
       return next;
     });
   }, []);
 
-  /** Build a progressMode-aware onToolComplete callback */
+  // Refresh context progress during streaming
+  useEffect(() => {
+    if (!streaming) return;
+    const timer = setInterval(() => setCtxProgress(agent.getContextProgress()), 1000);
+    return () => clearInterval(timer);
+  }, [streaming, agent]);
+
+  // Tool complete handler
   const buildToolCompleteHandler = useCallback(() => {
     return (info: { name: string; args: Record<string, unknown>; duration: number; isError: boolean; resultPreview: string }) => {
       const mode = agent.progressMode;
-      // "off": no tool output at all
-      if (mode === "off") {
-        setCtxProgress(agent.getContextProgress());
-        return;
-      }
-      // "new": skip if same tool as last time
+      if (mode === "off") return;
       if (mode === "new" && info.name === lastToolNameRef.current) {
         lastToolNameRef.current = info.name;
-        setCtxProgress(agent.getContextProgress());
         return;
       }
       lastToolNameRef.current = info.name;
-
       const line = formatToolCompletion(info.name, info.args, info.duration, {
         isError: info.isError, useColor: true,
       });
       addLine(chalk.dim("  ⎿ ") + line);
-
-      // "verbose": also show args and result preview
-      if (mode === "verbose") {
-        addLine(chalk.gray(`    args: ${JSON.stringify(info.args).slice(0, 300)}`));
-        if (info.resultPreview) {
-          addLine(chalk.gray(`    result: ${info.resultPreview}`));
-        }
-      }
       setCtxProgress(agent.getContextProgress());
     };
   }, [agent, addLine]);
 
-  // Build the command context for the shared processor
+  // Command context
   const cmdCtx = useCallback((): CommandContext => ({
-    agent,
-    memory,
-    sessionDb,
-    cronStore,
-    config,
-    userProfile,
+    agent, memory, sessionDb, cronStore, config, userProfile,
   }), [agent, memory, sessionDb, cronStore, config, userProfile]);
 
-  // Build ink output adapter
+  // Ink adapter
   const inkAdapter = useCallback((): InkAdapter => {
-    const streamCb = (token: string) => {
-      // no-op placeholder — real streaming handled in handleSubmit
-    };
-    const clearOutput = () => setOutput([]);
-    return new InkAdapter(addLine, addLines, clearOutput, setInput, onQuit, agent, streamCb);
+    const clearOutput = () => setLines([]);
+    return new InkAdapter(addLine, addLines, clearOutput, setInput, onQuit, agent, () => {});
   }, [agent, addLine, addLines, onQuit]);
 
-  // Main submit handler
+  // Submit handler
   const handleSubmit = useCallback(async (text: string) => {
     if (!text.trim() || isProcessing.current) return;
     const trimmed = text.trim();
@@ -133,92 +128,71 @@ export function ChatUI({
     if (trimmed.startsWith("/")) {
       setInput("");
 
-      // ── /resume without args → interactive session picker ──
+      // Model picker
+      const cmdParts = trimmed.split(/\s+/);
+      const cmdName = cmdParts[0].replace(/^\/+/, "").toLowerCase();
+      if (cmdName === "model" && !cmdParts[1]) {
+        // Fetch models from API
+        const baseUrl = config.llm.baseUrl.replace(/\/$/, "");
+        addLine(chalk.gray("  Fetching models..."));
+        const apiKey = config.llm.apiKey || "";
+        fetch(`${baseUrl}/models`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        }).then(res => res.json()).then((data: any) => {
+          const models: string[] = (data?.data ?? data?.models ?? [])
+            .map((m: any) => m.id ?? m.name ?? m)
+            .filter((m: any) => typeof m === "string");
+          if (models.length === 0) {
+            addLine(chalk.gray("  No models found."));
+            return;
+          }
+          const currentModel = config.llm.model;
+          const items: PickerItem[] = models.map(m => ({
+            id: `model:${m}`,
+            label: m,
+            detail: m === currentModel ? "current" : "",
+            type: "session" as const,
+          }));
+          setModelPickerItems(items);
+        }).catch(() => {
+          addLine(chalk.red("  Failed to fetch models from API."));
+        });
+        return;
+      }
+
+      // Resume picker
       const resumeParts = trimmed.split(/\s+/);
       const resumeCmd = resumeParts[0].replace(/^\/+/, "").toLowerCase();
       if ((resumeCmd === "resume" || resumeCmd === "continue") && !resumeParts[1]) {
         const items: PickerItem[] = [];
-        // Branches first
         for (const b of agent.listBranches()) {
           items.push({ id: `branch:${b}`, label: b, detail: "branch", type: "branch" });
         }
-        // Recent sessions
         const sessions = sessionDb.recentSessions(15);
         for (const s of sessions) {
           const raw = s as any;
           const title = raw.title
             || (raw.first_user_msg ? raw.first_user_msg.replace(/\n/g, " ").slice(0, 40) : null)
-            || raw.id?.slice(0, 24)
-            || "untitled";
+            || raw.id?.slice(0, 24) || "untitled";
           const date = (raw.created_at || raw.createdAt || "").slice(0, 16);
           const msgCount = raw.message_count ?? raw.messageCount ?? 0;
-          items.push({
-            id: `session:${raw.id}`,
-            label: title,
-            detail: `${msgCount} msgs  ${date}`,
-            type: "session",
-          });
+          items.push({ id: `session:${raw.id}`, label: title, detail: `${msgCount} msgs  ${date}`, type: "session" });
         }
         setPickerItems(items);
         return;
       }
 
-      // Use shared command processor
+      // Regular slash commands
       const adapter = inkAdapter();
       const ctx = cmdCtx();
-
-      // For skill commands, use the full streaming UI path
       const parts = trimmed.split(/\s+/);
-      const skillName = parts[0].replace(/^\/+/, "");
-      const skillReg = agent.getSkillRegistry();
-      const skill = skillReg?.get(skillName);
-      if (skill?.userInvocable) {
-        // Skill slash — full streaming UI (same as normal chat)
-        isProcessing.current = true;
-        addLine(chalk.cyan(`  ⚡ Skill: ${skill.name}`));
-        setStreaming(true);
-        setThinking(true);
-        setStreamText("");
-
-        agent.onToolCall = (name, args) => { setCtxProgress(agent.getContextProgress()); };
-        agent.onToolComplete = buildToolCompleteHandler();
-        agent.onToolResult = () => {};
-
-        let firstToken = true;
-        let accumulated = "";
-        try {
-          const result = await agent.runStream(trimmed, (token) => {
-            const safeToken = String(token ?? "");
-            if (firstToken) { setThinking(false); firstToken = false; }
-            accumulated += safeToken;
-            setStreamText(accumulated);
-          });
-          if (firstToken) accumulated = result ?? "";
-          const rendered = renderMarkdown(accumulated);
-          addLines([chalk.dim("  ⎿ ") + rendered.split("\n").join("\n    "), ""]);
-        } catch (err) {
-          addLine(chalk.dim("  ⎿  ") + chalk.red(`✗ ${(err as Error).message}`));
-        } finally {
-          setStreaming(false);
-          setStreamText("");
-          setThinking(false);
-          isProcessing.current = false;
-          setCtxProgress(agent.getContextProgress());
-        }
-        return;
-      }
-
-      // Regular slash commands — delegate to shared processor
       await processCommandAsync(trimmed, ctx, adapter);
-
-      // Check if command was quit
-      const resolved = (await import("@skeleton/core")).resolveCommand(parts[0]);
-      if (resolved?.name === "quit" || resolved?.name === "exit") {
-        exit();
-      }
+      const resolved = (await import("@skeleton/core")).resolveSlashCommand(parts[0]);
+      if (resolved?.name === "quit" || resolved?.name === "exit") exit();
       return;
     }
 
+    // Normal message
     isProcessing.current = true;
     addLine("");
     addLine(chalk.bold("> ") + trimmed);
@@ -227,11 +201,7 @@ export function ChatUI({
     setThinking(true);
     setStreamText("");
 
-    // Wire tool call callbacks — progressMode-aware (Task 5)
-    agent.onToolCall = (name, args) => {
-      const preview = formatToolInProgress(name, args);
-      setCtxProgress(agent.getContextProgress());
-    };
+    agent.onToolCall = () => {};
     agent.onToolComplete = buildToolCompleteHandler();
     agent.onToolResult = () => {};
 
@@ -241,23 +211,19 @@ export function ChatUI({
     try {
       const result = await agent.runStream(trimmed, (token) => {
         const safeToken = String(token ?? "");
-        if (firstToken) {
-          setThinking(false);
-          firstToken = false;
-        }
+        if (firstToken) { setThinking(false); firstToken = false; }
         accumulated += safeToken;
         setStreamText(accumulated);
       });
 
-      if (firstToken) {
-        accumulated = result ?? "";
-      }
+      if (firstToken) accumulated = result ?? "";
 
+      // Commit final output
       const rendered = renderMarkdown(accumulated);
-      addLines([chalk.dim("  ⎿ ") + rendered.split("\n").join("\n    "), ""]);
+      const indented = rendered.split("\n").map(l => "    " + l).join("\n");
+      addLines([chalk.dim("  ⎿") + indented, ""]);
     } catch (err) {
-      const msg = (err as Error).message;
-      addLine(chalk.dim("  ⎿  ") + chalk.red(`✗ ${msg}`));
+      addLine(chalk.dim("  ⎿ ") + chalk.red(`✗ ${(err as Error).message}`));
     } finally {
       setStreaming(false);
       setStreamText("");
@@ -265,35 +231,45 @@ export function ChatUI({
       isProcessing.current = false;
       setCtxProgress(agent.getContextProgress());
     }
-  }, [agent, addLine, addLines, cmdCtx, inkAdapter]);
+  }, [agent, addLine, addLines, cmdCtx, inkAdapter, buildToolCompleteHandler, exit, sessionDb]);
 
-  const [selectedCmd, setSelectedCmd] = useState(0);
+  // Unified slash entries: built-in commands + user-invocable skills (Claude Code pattern).
+  // Skills are treated as Command-shaped entries so `/` autocomplete shows them alongside
+  // /new, /model, etc. Dispatch still goes through processCommandAsync which detects
+  // skill names before looking up the command registry.
+  const slashEntries = useMemo(() => {
+    const skillReg = agent.getSkillRegistry();
+    const skillEntries = skillReg
+      ? skillReg.list()
+          .filter((s: any) => s.userInvocable)
+          .map((s: any) => ({
+            name: s.name,
+            description: s.description || "Skill",
+            category: "Skill" as any,
+          }))
+      : [];
+    return [...COMMAND_REGISTRY, ...skillEntries];
+  }, [agent, lines.length]);
 
-  // Key input handler
+  // Key input
   useInput((ch, key) => {
-    // Allow typing even during processing (queued for next turn)
-    if (pickerItems !== null) return;
+    if (pickerItems !== null || modelPickerItems !== null) return;
 
-    // During processing: only allow typing into input buffer (no submit)
+    // Allow typing during processing
     if (isProcessing.current) {
-      if (key.backspace) {
-        setInput(prev => prev.slice(0, -1));
-      } else if (ch && !key.ctrl && !key.meta && !key.return) {
-        setInput(prev => {
-          const next = prev + ch;
-          return next.length > 500 ? next.slice(0, 500) : next;
-        });
+      if (key.backspace) setInput(prev => prev.slice(0, -1));
+      else if (ch && !key.ctrl && !key.meta && !key.return) {
+        setInput(prev => (prev + ch).slice(0, 500));
       }
       return;
     }
 
     if (key.return) {
-      // If command suggestions are visible and one is selected, fill it in
       if (input.startsWith("/") && !input.includes(" ")) {
         const partial = input.slice(1).toLowerCase();
         const matches = partial
-          ? COMMAND_REGISTRY.filter(c => c.name.startsWith(partial))
-          : COMMAND_REGISTRY;
+          ? slashEntries.filter(c => c.name.startsWith(partial))
+          : slashEntries;
         if (matches.length > 0 && selectedCmd < matches.length) {
           const chosen = matches[selectedCmd];
           if (chosen && input !== "/" + chosen.name) {
@@ -305,256 +281,178 @@ export function ChatUI({
       }
       handleSubmit(input);
       setSelectedCmd(0);
-    } else if (key.tab) {
-      // Tab: fill in selected command
-      if (input.startsWith("/")) {
-        const partial = input.slice(1).toLowerCase();
-        const matches = partial
-          ? COMMAND_REGISTRY.filter(c => c.name.startsWith(partial))
-          : COMMAND_REGISTRY;
-        if (matches.length > 0 && selectedCmd < matches.length) {
-          setInput("/" + matches[selectedCmd].name);
-          setSelectedCmd(0);
-        }
+    } else if (key.tab && input.startsWith("/")) {
+      const partial = input.slice(1).toLowerCase();
+      const matches = partial
+        ? slashEntries.filter(c => c.name.startsWith(partial))
+        : slashEntries;
+      if (matches.length > 0 && selectedCmd < matches.length) {
+        setInput("/" + matches[selectedCmd].name);
+        setSelectedCmd(0);
       }
     } else if (key.upArrow && input.startsWith("/") && !input.includes(" ")) {
       setSelectedCmd(prev => Math.max(0, prev - 1));
     } else if (key.downArrow && input.startsWith("/") && !input.includes(" ")) {
       const partial = input.slice(1).toLowerCase();
       const count = partial
-        ? COMMAND_REGISTRY.filter(c => c.name.startsWith(partial)).length
-        : COMMAND_REGISTRY.length;
+        ? slashEntries.filter(c => c.name.startsWith(partial)).length
+        : slashEntries.length;
       setSelectedCmd(prev => Math.min(count - 1, prev + 1));
     } else if (key.backspace) {
       setInput(prev => prev.slice(0, -1));
       setSelectedCmd(0);
     } else if (key.escape) {
-      if (input.startsWith("/")) {
-        setInput("");
-        setSelectedCmd(0);
-      }
+      if (input) { setInput(""); setSelectedCmd(0); }
     } else if (ch && !key.ctrl && !key.meta) {
-      setInput(prev => {
-        const next = prev + ch;
-        return next.length > 500 ? next.slice(0, 500) : next;
-      });
+      setInput(prev => (prev + ch).slice(0, 500));
       setSelectedCmd(0);
     }
   });
 
-  // Periodically refresh context progress during streaming (Hermes-style live update)
-  useEffect(() => {
-    if (!streaming) return;
-    const timer = setInterval(() => {
-      setCtxProgress(agent.getContextProgress());
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [streaming, agent]);
+  const [currentModel, setCurrentModel] = useState(model);
+  const shortModel = currentModel.length > 30 ? currentModel.slice(0, 27) + "..." : currentModel;
 
-  // Short model name for status bar
-  const shortModel = model.length > 30 ? model.slice(0, 27) + "..." : model;
-
-  // ── Session picker overlay ──
-  if (pickerItems !== null) {
+  // Model picker overlay
+  if (modelPickerItems !== null) {
     return (
       <Box flexDirection="column">
+        <SessionPicker
+          items={modelPickerItems}
+          onSelect={(item) => {
+            setModelPickerItems(null);
+            const modelName = item.id.replace("model:", "");
+            agent.switchModel(modelName);
+            setCurrentModel(modelName);
+            addLine(chalk.green(`  ✓ Model switched to: ${chalk.white(modelName)}`));
+          }}
+          onCancel={() => { setModelPickerItems(null); addLine(chalk.gray("  Cancelled.")); }}
+        />
+      </Box>
+    );
+  }
+
+  // Session picker overlay
+  if (pickerItems !== null) {
+    return (
+      <Box flexDirection="column" height="100%">
         <SessionPicker
           items={pickerItems}
           onSelect={(item) => {
             setPickerItems(null);
             if (item.type === "branch") {
               const ok = agent.resumeBranch(item.id.replace("branch:", ""));
-              if (ok) {
-                addLine(chalk.green(`  ✓ Resumed branch "${item.label}"`));
-                addLine("");
-              } else {
-                addLine(chalk.red(`  ✗ Failed to resume "${item.label}"`));
-              }
+              if (ok) addLine(chalk.green(`  ✓ Resumed branch "${item.label}"`));
+              else addLine(chalk.red(`  ✗ Failed to resume "${item.label}"`));
             } else {
-              // Session resume — load messages and render history
               const sid = item.id.replace("session:", "");
               const messages = sessionDb.getMessages(sid);
-              if (messages.length === 0) {
-                addLine(chalk.gray(`  No messages in session "${item.label}".`));
-                return;
-              }
-
-              // Render conversation history
-              addLine(chalk.dim("  ┌─ Previous Conversation ─────────────"));
-              for (const msg of messages) {
-                if (msg.role === "user") {
-                  const preview = (msg.content || "").replace(/\n/g, " ").slice(0, 120);
-                  addLine(chalk.bold("  │ > ") + preview);
-                } else if (msg.role === "assistant") {
-                  const preview = (msg.content || "").replace(/\n/g, " ").slice(0, 120);
-                  addLine(chalk.dim("  │ ⎿ ") + preview);
-                } else if (msg.role === "tool") {
-                  const toolName = (msg as any).toolName || (msg as any).tool_name || "tool";
-                  addLine(chalk.dim(`  │   ⎿ ${toolName}`));
+              if (messages.length > 0) {
+                addLine(chalk.dim("  ┌─ Previous Conversation ─────────────"));
+                for (const msg of messages.slice(-20)) {
+                  if (msg.role === "user") addLine(chalk.bold("  │ > ") + (msg.content || "").replace(/\n/g, " ").slice(0, 100));
+                  else if (msg.role === "assistant") addLine(chalk.dim("  │ ⎿ ") + (msg.content || "").replace(/\n/g, " ").slice(0, 100));
                 }
+                addLine(chalk.dim("  └─────────────────────────────────────"));
+                agent.loadMessages(messages);
+                addLine(chalk.green(`  ✓ Resumed "${item.label}" (${messages.length} msgs)`));
               }
-              addLine(chalk.dim("  └─────────────────────────────────────"));
-              addLine("");
-
-              // Inject history into agent so next message continues the conversation
-              agent.loadMessages(messages);
-              addLine(chalk.green(`  ✓ Resumed "${item.label}" (${messages.length} messages)`));
-              addLine("");
             }
           }}
-          onCancel={() => {
-            setPickerItems(null);
-            addLine(chalk.gray("  Resume cancelled."));
-          }}
+          onCancel={() => { setPickerItems(null); addLine(chalk.gray("  Cancelled.")); }}
         />
       </Box>
     );
   }
 
+  // Command suggestions (scrolling window around selectedCmd)
+  const showSuggestions = input.startsWith("/") && !isProcessing.current;
+  const SUGGEST_WINDOW = 10;
+  let suggestions: typeof slashEntries = [];
+  let totalSuggestions = 0;
+  let windowStart = 0;
+  if (showSuggestions) {
+    const partial = input.slice(1).toLowerCase();
+    const allMatches = partial
+      ? slashEntries.filter(c => c.name.startsWith(partial))
+      : slashEntries;
+    totalSuggestions = allMatches.length;
+    // Scroll so the selected item stays visible inside the SUGGEST_WINDOW
+    const safeSelected = Math.max(0, Math.min(selectedCmd, totalSuggestions - 1));
+    windowStart = Math.max(0, Math.min(
+      safeSelected - Math.floor(SUGGEST_WINDOW / 2),
+      Math.max(0, totalSuggestions - SUGGEST_WINDOW),
+    ));
+    suggestions = allMatches.slice(windowStart, windowStart + SUGGEST_WINDOW);
+  }
+  const maxNameLen = suggestions.length > 0 ? Math.max(...suggestions.map(c => c.name.length)) : 0;
+
   return (
     <Box flexDirection="column">
-      {/* Output area — finished lines rendered ONCE via <Static> so they
-          never re-render and the terminal doesn't scroll-jump on every
-          stream token. Only the streaming preview at the bottom updates. */}
-      <Static items={output}>
-        {(item) => (
-          <Box key={`out-${item.id}`} flexDirection="column">
-            {item.line.split("\n").map((sub, j) => (
-              <Text key={`out-${item.id}-${j}`}>{sub}</Text>
-            ))}
-          </Box>
-        )}
-      </Static>
+      {/* Logo header */}
+      <Text color="yellow" bold>{`  ██████╗  Skeleton v0.1.0`}</Text>
+      <Text><Text color="yellow" bold>{`  ██╔══██╗ `}</Text><Text color="gray">{shortModel}</Text></Text>
+      <Text><Text color="yellow" bold>{`  ██████╔╝ `}</Text><Text color="gray">{process.cwd()}</Text></Text>
+      <Text color="yellow" bold>{`  ██╔══╝   `}</Text>
+      <Text color="yellow" bold>{`  ██║      `}</Text>
+      <Text><Text color="yellow" bold>{`  ╚═╝      `}</Text><Text color="gray">{`${toolCount} tools · ${mcpCount} MCP`}</Text></Text>
+      <Text>{""}</Text>
 
-      {/* Live streaming preview */}
-      <Box flexDirection="column">
-        {streamText && (
-          <Box paddingLeft={4}>
-            <Text wrap="wrap">{streamText}</Text>
-          </Box>
-        )}
-        {thinking && !streamText && (
-          <Text color="gray">{"    ⏳"}</Text>
-        )}
-      </Box>
+      {/* Messages */}
+      {lines.map(line => (
+        <Text key={line.id} wrap="wrap">{line.text}</Text>
+      ))}
 
-      {/* Status bar — minimal */}
-      <Box paddingLeft={1} paddingRight={1}>
-        <Text color="gray">{shortModel}</Text>
-        {agent.statusBarMode !== "compact" && (
-          <>
-            <Text color="gray"> · </Text>
-            <Text color="gray">{toolCount} tools</Text>
-            {ctxProgress && (
-              <>
-                <Text color="gray"> · </Text>
-                <Text color={contextBarColor(ctxProgress.percent)}>
-                  {formatTokenCount(ctxProgress.usedTokens)}/{formatTokenCount(ctxProgress.contextWindow)} ({ctxProgress.percent}%)
+      {/* Streaming preview */}
+      {streamText && (
+        <Box paddingLeft={4}>
+          <Text wrap="wrap">{streamText}</Text>
+        </Box>
+      )}
+      {thinking && !streamText && (
+        <Text color="gray">{"    ⏳ thinking..."}</Text>
+      )}
+
+      {/* Command suggestions */}
+      {showSuggestions && suggestions.length > 0 && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {windowStart > 0 && (
+            <Text color="gray">{`  ↑ ${windowStart} more above`}</Text>
+          )}
+          {suggestions.map((cmd, i) => {
+            const absoluteIdx = windowStart + i;
+            const isSelected = absoluteIdx === selectedCmd;
+            return (
+              <Text key={cmd.name}>
+                <Text color={isSelected ? "cyan" : "gray"}>{isSelected ? "❯ " : "  "}</Text>
+                <Text color={isSelected ? "white" : "gray"} bold={isSelected}>
+                  {`/${cmd.name.padEnd(maxNameLen + 2)}`}
                 </Text>
-              </>
-            )}
-          </>
-        )}
-        {streaming && <Text color="gray"> · </Text>}
-        {streaming && <Text color="yellow">●</Text>}
-      </Box>
+                <Text color="gray">{cmd.description}</Text>
+              </Text>
+            );
+          })}
+          {windowStart + suggestions.length < totalSuggestions && (
+            <Text color="gray">{`  ↓ ${totalSuggestions - windowStart - suggestions.length} more below`}</Text>
+          )}
+        </Box>
+      )}
 
-      {/* Slash command suggestions — vertical list like Claude Code */}
-      {input.startsWith("/") && !isProcessing.current && (() => {
-        const hasSpace = input.includes(" ");
-        const partial = input.slice(1).toLowerCase();
-
-        // Sub-command / argument completion (after space)
-        if (hasSpace) {
-          const cmdName = partial.split(/\s+/)[0];
-          const argPartial = input.slice(input.indexOf(" ") + 1).toLowerCase();
-          let argItems: { name: string; desc: string }[] = [];
-
-          if (cmdName === "resume" || cmdName === "branch") {
-            const branches = agent.listBranches();
-            argItems = branches
-              .filter(b => !argPartial || b.toLowerCase().startsWith(argPartial))
-              .map(b => ({ name: b, desc: "branch" }));
-          } else if (cmdName === "sessions") {
-            // Show subcommands
-            argItems = [
-              { name: "list", desc: "Browse past sessions" },
-              { name: "search", desc: "Search sessions by keyword" },
-            ].filter(s => !argPartial || s.name.startsWith(argPartial));
-          } else if (cmdName === "verbose") {
-            argItems = ["off", "new", "all", "verbose"]
-              .filter(s => !argPartial || s.startsWith(argPartial))
-              .map(s => ({ name: s, desc: "" }));
-          } else if (cmdName === "snapshot") {
-            argItems = ["create", "restore", "list", "prune"]
-              .filter(s => !argPartial || s.startsWith(argPartial))
-              .map(s => ({ name: s, desc: "" }));
-          } else if (cmdName === "goal") {
-            argItems = ["status", "pause", "resume", "clear"]
-              .filter(s => !argPartial || s.startsWith(argPartial))
-              .map(s => ({ name: s, desc: "" }));
-          } else if (cmdName === "plugin") {
-            argItems = ["list", "load", "unload", "reload"]
-              .filter(s => !argPartial || s.startsWith(argPartial))
-              .map(s => ({ name: s, desc: "" }));
-          } else if (cmdName === "skin") {
-            argItems = ["default", "midnight", "hacker", "sakura", "ocean"]
-              .filter(s => !argPartial || s.startsWith(argPartial))
-              .map(s => ({ name: s, desc: "theme" }));
-          } else if (cmdName === "lang") {
-            argItems = ["en", "zh", "ja", "ko", "de", "es", "fr", "tr", "uk"]
-              .filter(s => !argPartial || s.startsWith(argPartial))
-              .map(s => ({ name: s, desc: "" }));
-          }
-
-          if (argItems.length === 0) return null;
-          const maxLen = Math.max(...argItems.map(a => a.name.length));
-          return (
-            <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
-              {argItems.slice(0, 10).map((item, i) => (
-                <Text key={item.name} dimColor={i !== 0}>
-                  <Text color={i === 0 ? "cyan" : "white"} bold={i === 0}>
-                    {item.name.padEnd(maxLen + 2)}
-                  </Text>
-                  {item.desc && <Text color="gray">{item.desc}</Text>}
-                </Text>
-              ))}
-            </Box>
-          );
-        }
-
-        // Top-level command completion
-        const matches = partial
-          ? COMMAND_REGISTRY.filter(c => c.name.startsWith(partial)).slice(0, 12)
-          : COMMAND_REGISTRY.slice(0, 12);
-        if (matches.length === 0) return null;
-        const maxNameLen = Math.max(...matches.map(c => c.name.length));
-        return (
-          <Box flexDirection="column" paddingLeft={2} marginBottom={0}>
-            {matches.map((cmd, i) => {
-              const isSelected = i === selectedCmd;
-              const padded = cmd.name.padEnd(maxNameLen + 2);
-              return (
-                <Text key={cmd.name}>
-                  <Text color={isSelected ? "cyan" : "gray"}>
-                    {isSelected ? "❯ " : "  "}
-                  </Text>
-                  <Text color={isSelected ? "white" : "gray"} bold={isSelected}>
-                    {`/${padded}`}
-                  </Text>
-                  <Text color="gray">{cmd.description}</Text>
-                </Text>
-              );
-            })}
-          </Box>
-        );
-      })()}
-
-      {/* Input area — clean minimal prompt */}
-      <Box paddingLeft={1} paddingRight={1}>
-        <Text color="white" bold>{"> "}</Text>
+      {/* Input */}
+      <Box>
+        <Text bold color="white">{"> "}</Text>
         <Text>{input}</Text>
-        <Text color="gray">{"█"}</Text>
+        <Text color="gray">█</Text>
+      </Box>
+
+      {/* Status line */}
+      <Box paddingLeft={2}>
+        <Text color="gray">{shortModel} · {toolCount} tools</Text>
+        {ctxProgress && (
+          <Text color={contextBarColor(ctxProgress.percent)}>
+            {` · ${formatTokenCount(ctxProgress.usedTokens)}/${formatTokenCount(ctxProgress.contextWindow)} (${ctxProgress.percent}%)`}
+          </Text>
+        )}
+        {streaming && <Text color="yellow"> · ●</Text>}
       </Box>
     </Box>
   );
@@ -570,11 +468,11 @@ export function launchChatUI(
     userProfile: UserProfile;
     sessionDb: SessionDB;
     cronStore: CronStore;
-    config: { llm: { protocol: string; model: string; baseUrl: string } };
+    config: { llm: { protocol: string; model: string; baseUrl: string; apiKey: string } };
     onQuit: () => Promise<void>;
   },
 ): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise(() => {
     render(
       <ChatUI
         agent={agent}

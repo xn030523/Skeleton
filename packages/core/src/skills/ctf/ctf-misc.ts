@@ -4,7 +4,7 @@ export const ctfMiscSkill: SkillDef = {
   name: "ctf-misc",
   description: "Miscellaneous: Python/bash jails, encodings, esoteric languages, Z3 constraint solving, games/VMs, SDR/RF, privilege escalation, CTFd API.",
   category: "ctf",
-  userInvocable: false,
+  userInvocable: true,
   content: () => `# CTF Miscellaneous
 
 ## Key Techniques

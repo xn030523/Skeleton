@@ -5,7 +5,6 @@ import chalk from "chalk";
 import { execSync } from "node:child_process";
 import {
   loadConfig,
-  loadEnv,
   listBuiltinMcpServersByCategory,
   findProvider,
   listProviders,
@@ -13,7 +12,7 @@ import {
 } from "@skeleton/core";
 
 const SKELETON_DIR = path.join(os.homedir(), ".skeleton");
-const CONFIG_FILE = path.join(SKELETON_DIR, "config.yaml");
+const CONFIG_FILE = path.join(SKELETON_DIR, "config.json");
 const ENV_FILE = getSkeletonEnvPath();
 
 interface CheckResult {
@@ -29,7 +28,6 @@ function icon(status: CheckResult["status"]): string {
 }
 
 export async function runDoctor(): Promise<void> {
-  loadEnv();
   const results: CheckResult[] = [];
 
   // 1. ~/.skeleton directory
@@ -48,26 +46,15 @@ export async function runDoctor(): Promise<void> {
     });
   }
 
-  // 2. config.yaml
+  // 2. config.json
   if (fs.existsSync(CONFIG_FILE)) {
     results.push({ name: "Config file", status: "ok", detail: CONFIG_FILE });
   } else {
-    // Check for legacy skeleton.yaml
-    const legacyCwd = path.join(process.cwd(), "skeleton.yaml");
-    const legacyHome = path.join(SKELETON_DIR, "skeleton.yaml");
-    if (fs.existsSync(legacyCwd) || fs.existsSync(legacyHome)) {
-      results.push({
-        name: "Config file",
-        status: "warn",
-        detail: "Legacy skeleton.yaml found. Run `skeleton setup` to migrate.",
-      });
-    } else {
-      results.push({
-        name: "Config file",
-        status: "warn",
-        detail: "Not found. Run `skeleton setup` to create.",
-      });
-    }
+    results.push({
+      name: "Config file",
+      status: "warn",
+      detail: "Not found. Run `skeleton setup` to create.",
+    });
   }
 
   // 3. .env (secrets)
@@ -247,7 +234,7 @@ export async function runDoctor(): Promise<void> {
     results.push({
       name: "MCP servers (env)",
       status: "ok",
-      detail: "None enabled via env (use config.yaml or env vars)",
+      detail: "None enabled via env (use config.json or env vars)",
     });
   }
 
