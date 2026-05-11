@@ -528,6 +528,7 @@ const jshookMcp: BuiltinMcpServer = {
     env: { JSHOOK_BASE_PROFILE: "search" },
   },
   envEnable: "SKELETON_MCP_JSHOOK",
+  defaultEnabled: true,
 };
 
 const playwrightMcp: BuiltinMcpServer = {
@@ -541,6 +542,7 @@ const playwrightMcp: BuiltinMcpServer = {
   },
   envEnable: "SKELETON_MCP_PLAYWRIGHT",
   optionalEnv: ["PLAYWRIGHT_MCP_BROWSER", "PLAYWRIGHT_MCP_HEADLESS"],
+  defaultEnabled: true,
 };
 
 const chromeDevtoolsMcp: BuiltinMcpServer = {
@@ -578,6 +580,7 @@ const cdpToolsMcp: BuiltinMcpServer = {
     env: {},
   },
   envEnable: "SKELETON_MCP_CDP_TOOLS",
+  defaultEnabled: true,
 };
 
 const firefoxDevtoolsMcp: BuiltinMcpServer = {
@@ -644,6 +647,7 @@ const apiTesterMcp: BuiltinMcpServer = {
     env: {},
   },
   envEnable: "SKELETON_MCP_API_TESTER",
+  defaultEnabled: true,
 };
 
 // ─── Master list ─────────────────────────────────────────────────────────────

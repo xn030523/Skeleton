@@ -110,7 +110,10 @@ function stopKeepalive(): void {
 // ─── Core Connection ────────────────────────────────────────────────────────
 
 export async function connectMcpServer(name: string, config: McpServerConfig): Promise<{ tools: ToolDef[]; client: Client }> {
-  const client = new Client({ name: "skeleton", version: "0.1.0" });
+  const client = new Client(
+    { name: "skeleton", version: "0.1.0" },
+    { capabilities: { tools: {}, resources: {} } },
+  );
 
   let transport;
   if (config.url) {
@@ -146,13 +149,17 @@ export async function connectMcpServer(name: string, config: McpServerConfig): P
   await client.connect(transport);
 
   // Listen for tools/list_changed notifications from the server
-  client.setNotificationHandler(
-    { method: "notifications/tools/list_changed" },
-    () => {
-      console.log(`MCP server "${name}" sent tools/list_changed — triggering refresh`);
-      if (onToolListChanged) onToolListChanged(name);
-    },
-  );
+  try {
+    client.setNotificationHandler(
+      { method: "notifications/tools/list_changed" } as any,
+      () => {
+        console.log(`MCP server "${name}" sent tools/list_changed — triggering refresh`);
+        if (onToolListChanged) onToolListChanged(name);
+      },
+    );
+  } catch {
+    // Older SDK versions may not support this notification schema — non-critical
+  }
 
   const { tools } = await client.listTools();
 

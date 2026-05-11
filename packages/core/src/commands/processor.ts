@@ -1476,8 +1476,24 @@ function cmdMcp(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): b
       ]);
       return true;
     }
+    // Use the mcp_manage tool's enableBuiltin logic (checks platform, env, command, OSV)
     adapter.addLine(chalk.yellow(`  ⏳ Enabling "${name}"...`));
-    agent.addMcpServer(name, { command: name }).then(({ added, warnings }) => {
+    const { BUILTIN_MCP_SERVERS } = require("../mcp/servers.js") as { BUILTIN_MCP_SERVERS: any[] };
+    const builtin = BUILTIN_MCP_SERVERS.find((s: any) => s.name === name);
+    if (!builtin) {
+      adapter.addLine(chalk.red(`  ✗ Unknown server "${name}". Use /mcp enable (no args) to see available.`));
+      return true;
+    }
+    if (builtin.requiredEnv) {
+      const missing = builtin.requiredEnv.filter((v: string) => !process.env[v]);
+      if (missing.length > 0) {
+        adapter.addLine(chalk.red(`  ✗ Missing env: ${missing.join(", ")}`));
+        adapter.addLine(chalk.gray(`    Set these in ~/.skeleton/.env then retry.`));
+        return true;
+      }
+    }
+    const config = { ...builtin.config, env: { ...builtin.config.env } };
+    agent.addMcpServer(name, config).then(({ added, warnings }) => {
       if (added.length > 0) adapter.addLine(chalk.green(`  ✓ Enabled "${name}" — ${added.length} tools`));
       if (warnings) for (const w of warnings) adapter.addLine(chalk.yellow(`    ⚠ ${w}`));
     }).catch((err: Error) => adapter.addLine(chalk.red(`  ✗ ${err.message}`)));
@@ -1495,7 +1511,10 @@ function cmdMcp(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): b
   if (sub === "reconnect") {
     if (!name) { adapter.addLine(chalk.gray("  Usage: /mcp reconnect <name>")); return true; }
     adapter.addLine(chalk.yellow(`  ⏳ Reconnecting "${name}"...`));
-    agent.removeMcpServer(name).then(() => agent.addMcpServer(name, { command: name }))
+    const { BUILTIN_MCP_SERVERS } = require("../mcp/servers.js") as { BUILTIN_MCP_SERVERS: any[] };
+    const builtin = BUILTIN_MCP_SERVERS.find((s: any) => s.name === name);
+    const config = builtin ? { ...builtin.config, env: { ...builtin.config.env } } : { command: name };
+    agent.removeMcpServer(name).then(() => agent.addMcpServer(name, config))
       .then(({ added }) => adapter.addLine(chalk.green(`  ✓ Reconnected "${name}" — ${added.length} tools`)))
       .catch((err: Error) => adapter.addLine(chalk.red(`  ✗ ${err.message}`)));
     return true;

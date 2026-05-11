@@ -8,14 +8,19 @@ export function skillViewTool(registry: SkillRegistry): ToolDef {
   return {
     name: "skill_view",
     description:
-      "View full instructions for a specific skill (Tier 2 progressive disclosure). " +
-      "Use after identifying a relevant skill from the catalog to get detailed workflow and techniques.",
+      "Load a skill's full content or access its linked files (references, templates, scripts). " +
+      "First call returns SKILL.md content plus a 'linked_files' list showing available supporting files. " +
+      "To access those, call again with file_path parameter.",
     parameters: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "Skill name to view full instructions for.",
+          description: "Skill name to view.",
+        },
+        file_path: {
+          type: "string",
+          description: "Optional: path to a linked file within the skill (e.g. 'references/api.md', 'scripts/run.sh'). Omit to get main SKILL.md content.",
         },
       },
       required: ["name"],
@@ -25,7 +30,38 @@ export function skillViewTool(registry: SkillRegistry): ToolDef {
       if (!name) return "Error: name is required";
       const skill = registry.get(name);
       if (!skill) return `Error: skill '${name}' not found`;
-      return skill.content();
+
+      // Track usage
+      try {
+        const { bumpSkillUsage } = require("./usage.js") as typeof import("./usage.js");
+        bumpSkillUsage(name);
+      } catch { /* non-critical */ }
+
+      // If file_path specified, load that specific file
+      const filePath = String(args.file_path ?? "");
+      if (filePath) {
+        if (filePath.includes("..")) return "Error: path traversal not allowed.";
+        const content = skill.loadResource?.(filePath);
+        if (!content) return `Error: file '${filePath}' not found in skill '${name}'.`;
+        return JSON.stringify({ success: true, name, file: filePath, content });
+      }
+
+      // Main content + linked files listing
+      const content = skill.content();
+      const linkedFiles = skill.listResources?.() ?? [];
+      const result: Record<string, unknown> = {
+        success: true,
+        name,
+        description: skill.description,
+        category: skill.category,
+        content,
+        skill_dir: skill.skillDir ?? null,
+      };
+      if (linkedFiles.length > 0) {
+        result.linked_files = linkedFiles;
+        result.usage_hint = "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md'";
+      }
+      return JSON.stringify(result);
     },
   };
 }
@@ -86,20 +122,21 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
   return {
     name: "skill_manage",
     description:
-      "Manage skills dynamically. Actions: " +
-      "'create' — create a new reusable skill document; " +
+      "Manage skills — your procedural memory for recurring task types. " +
+      "Actions: 'create' — create a new skill (SKILL.md + frontmatter); " +
       "'edit' — replace entire skill content; " +
-      "'patch' — update description/category only; " +
+      "'patch' — update description/category/invocable; " +
       "'delete' — remove a skill; " +
+      "'rename' — rename a skill; " +
       "'list' — list all skills; " +
-      "'write_file' — add a resource file to a skill; " +
-      "'remove_file' — delete a resource file from a skill.",
+      "'write_file' — add a supporting file (references/templates/scripts); " +
+      "'remove_file' — delete a supporting file.",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          enum: ["create", "edit", "patch", "delete", "list", "write_file", "remove_file"],
+          enum: ["create", "edit", "patch", "delete", "rename", "list", "write_file", "remove_file"],
           description: "Action to perform.",
         },
         name: {
@@ -130,6 +167,10 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
           type: "string",
           description: "Resource file content (for write_file).",
         },
+        new_name: {
+          type: "string",
+          description: "New skill name (for rename action).",
+        },
       },
       required: ["action"],
     },
@@ -158,8 +199,15 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
           if (!args.content) return "Error: content is required";
           if (registry.has(name)) return `Error: skill '${name}' already exists. Use 'edit' to modify.`;
 
-          // Capture content value immediately — not by reference to args
-          const capturedContent = String(args.content);
+          // Security: prompt injection scan
+          const contentStr = String(args.content);
+          const injectionPatterns = ["ignore previous instructions", "ignore all previous", "you are now", "disregard your", "system prompt:"];
+          const lowerContent = contentStr.toLowerCase();
+          if (injectionPatterns.some(p => lowerContent.includes(p))) {
+            return "Error: skill content contains patterns that may indicate prompt injection. Refusing to create.";
+          }
+
+          const capturedContent = contentStr;
           const capturedDesc = String(args.description ?? `Custom skill: ${name}`);
           const capturedCat = String(args.category ?? "general");
           const capturedInvocable = Boolean(args.user_invocable ?? false);
@@ -175,6 +223,13 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
 
           registry.register(skill);
           registry.saveToDisk(skill);
+
+          // Track usage
+          try {
+            const { bumpSkillUsage } = require("./usage.js") as typeof import("./usage.js");
+            bumpSkillUsage(name);
+          } catch { /* non-critical */ }
+
           return `Skill '${name}' created and persisted to disk.`;
         }
 
@@ -228,22 +283,33 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
 
         case "write_file": {
           if (!name) return "Error: name is required";
-          if (!args.file_name) return "Error: file_name is required";
+          if (!args.file_name) return "Error: file_name is required (e.g. 'references/api.md', 'scripts/run.sh')";
           if (args.file_content === undefined || args.file_content === null) return "Error: file_content is required";
           const existing = registry.get(name);
           if (!existing?.agentCreated) return `Error: custom skill '${name}' not found`;
 
-          const skillDir = path.join(
+          const fileName = String(args.file_name);
+          // Security: block path traversal
+          if (fileName.includes("..") || fileName.startsWith("/")) {
+            return "Error: path traversal not allowed. Use relative paths like 'references/api.md'.";
+          }
+
+          const skillDir = existing.skillDir ?? path.join(
             registry.getSkillDir(),
             name.replace(/[^a-z0-9_-]/gi, "_"),
           );
-          fs.mkdirSync(skillDir, { recursive: true });
-          fs.writeFileSync(
-            path.join(skillDir, String(args.file_name)),
-            String(args.file_content),
-            "utf-8",
-          );
-          return `File '${args.file_name}' added to skill '${name}'.`;
+          const targetPath = path.join(skillDir, fileName);
+          // Ensure parent directory exists (supports references/foo.md, scripts/bar.sh)
+          fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+          fs.writeFileSync(targetPath, String(args.file_content), "utf-8");
+
+          // Track usage
+          try {
+            const { bumpSkillUsage } = require("./usage.js") as typeof import("./usage.js");
+            bumpSkillUsage(name);
+          } catch { /* non-critical */ }
+
+          return `File '${fileName}' written to skill '${name}' at ${targetPath}.`;
         }
 
         case "remove_file": {
@@ -252,7 +318,7 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
           const existing = registry.get(name);
           if (!existing?.agentCreated) return `Error: custom skill '${name}' not found`;
 
-          const skillDir = path.join(
+          const skillDir = existing.skillDir ?? path.join(
             registry.getSkillDir(),
             name.replace(/[^a-z0-9_-]/gi, "_"),
           );
@@ -260,6 +326,30 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
           if (!fs.existsSync(filePath)) return `Error: file '${args.file_name}' not found`;
           fs.unlinkSync(filePath);
           return `File '${args.file_name}' removed from skill '${name}'.`;
+        }
+
+        case "rename": {
+          if (!name) return "Error: name (current name) is required";
+          const newName = String(args.new_name ?? args.file_name ?? "");
+          if (!newName) return "Error: new_name is required";
+          const existing = registry.get(name);
+          if (!existing) return `Error: skill '${name}' not found`;
+          if (!existing.agentCreated) return `Error: cannot rename built-in skill '${name}'`;
+          if (registry.has(newName)) return `Error: skill '${newName}' already exists`;
+
+          // Delete old, create new
+          const content = existing.content();
+          registry.unregister(name);
+          registry.deleteFromDisk(name);
+
+          const renamed: SkillDef = {
+            ...existing,
+            name: newName,
+            content: () => content,
+          };
+          registry.register(renamed);
+          registry.saveToDisk(renamed);
+          return `Skill renamed: '${name}' → '${newName}'.`;
         }
 
         default:

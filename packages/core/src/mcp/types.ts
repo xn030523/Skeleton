@@ -9,6 +9,8 @@ export interface BuiltinMcpServer {
   requiredEnv?: string[];
   optionalEnv?: string[];
   platform?: NodeJS.Platform[];
+  /** If true, this server starts automatically when its command is available (no env var needed) */
+  defaultEnabled?: boolean;
 }
 
 export type McpCategory =

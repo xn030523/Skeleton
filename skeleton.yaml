@@ -261,17 +261,7 @@ mcp:
   #     OTX_API_KEY: "xxx"                 # optional
 
   # ─── Browser Instrumentation ─────────────────────────────────────────
-  # jshook:                              # 387 tools across 36 domains
-  #   command: npx
-  #   args: ["-y", "@jshookmcp/jshook@latest"]
-  #   env:
-  #     JSHOOK_BASE_PROFILE: "search"
-
-  # playwright-mcp:                       # Microsoft Playwright (32k stars)
-  #   command: npx
-  #   args: ["@playwright/mcp@latest"]
-  #   env:
-  #     PLAYWRIGHT_MCP_HEADLESS: "true"       # optional
+  # (jshook, playwright-mcp, cdp-tools-mcp are built-in and auto-enabled — no config needed)
 
   # chrome-devtools-mcp:                  # Chrome automation (30 stars)
   #   command: npx
@@ -280,10 +270,6 @@ mcp:
   # rc-devtools-mcp:                      # Browser RE & debugging
   #   command: npx
   #   args: ["@reverse-craft/rc-devtools-mcp@latest"]
-
-  # cdp-tools-mcp:                        # Chrome DevTools Protocol
-  #   command: npx
-  #   args: ["-y", "cdp-tools-mcp@latest"]
 
   # firefox-devtools-mcp:                  # Mozilla Firefox DevTools (147 stars)
   #   command: npx

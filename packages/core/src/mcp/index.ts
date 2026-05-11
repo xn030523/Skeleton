@@ -35,7 +35,7 @@ export function buildMcpServersConfig(
     }
   }
 
-  // Built-in servers: only activate when explicitly enabled
+  // Built-in servers: activate when explicitly enabled OR defaultEnabled
   for (const builtin of BUILTIN_MCP_SERVERS) {
     // If user already defined this name, their config wins
     if (servers[builtin.name]) continue;
@@ -45,26 +45,33 @@ export function buildMcpServersConfig(
       continue;
     }
 
-    // Check explicit enable via env var
+    // Check explicit enable via env var OR defaultEnabled flag
     const envVal = (process.env[builtin.envEnable] ?? "").toLowerCase();
-    if (envVal !== "true") continue;
+    const isEnabled = envVal === "true" || builtin.defaultEnabled === true;
+    if (!isEnabled) continue;
 
     // Required env vars must be present
     if (builtin.requiredEnv) {
       const missing = builtin.requiredEnv.filter((v) => !process.env[v]);
       if (missing.length > 0) {
-        console.warn(
-          `  MCP "${builtin.name}" enabled but missing required env: ${missing.join(", ")}. Skipping.`,
-        );
+        // For defaultEnabled servers, silently skip (don't spam warnings)
+        if (!builtin.defaultEnabled) {
+          console.warn(
+            `  MCP "${builtin.name}" enabled but missing required env: ${missing.join(", ")}. Skipping.`,
+          );
+        }
         continue;
       }
     }
 
-    // Command must exist on the system (Hermes-style shutil.which() check)
+    // Command must exist on the system
     if (builtin.config.command && !isCommandAvailable(builtin.config.command)) {
-      console.warn(
-        `  MCP "${builtin.name}" enabled but command "${builtin.config.command}" not found. Skipping. Install the required tool or remove SKELETON_MCP_${builtin.name.replace(/-/g, "_").toUpperCase()}=true.`,
-      );
+      // For defaultEnabled servers, silently skip (tool not installed = fine)
+      if (!builtin.defaultEnabled) {
+        console.warn(
+          `  MCP "${builtin.name}" enabled but command "${builtin.config.command}" not found. Skipping.`,
+        );
+      }
       continue;
     }
 
