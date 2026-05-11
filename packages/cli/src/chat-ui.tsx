@@ -92,7 +92,7 @@ export function ChatUI({
       const line = formatToolCompletion(info.name, info.args, info.duration, {
         isError: info.isError, useColor: true,
       });
-      addLine("  " + line);
+      addLine(chalk.dim("  ⎿  ") + line);
 
       // "verbose": also show args and result preview
       if (mode === "verbose") {
@@ -193,11 +193,10 @@ export function ChatUI({
             setStreamText(accumulated);
           });
           if (firstToken) accumulated = result ?? "";
-          const headerLine = chalk.magenta("◆") + chalk.gray(" Skeleton");
           const rendered = renderMarkdown(accumulated);
-          addLines([headerLine, rendered, chalk.gray("─".repeat(60))]);
+          addLines(["", chalk.dim("  ⎿  ") + rendered.split("\n").join("\n     "), ""]);
         } catch (err) {
-          addLine(chalk.red(`  ✗ ${(err as Error).message}`));
+          addLine(chalk.dim("  ⎿  ") + chalk.red(`✗ ${(err as Error).message}`));
         } finally {
           setStreaming(false);
           setStreamText("");
@@ -220,7 +219,8 @@ export function ChatUI({
     }
 
     isProcessing.current = true;
-    addLine(chalk.green("❯") + " " + trimmed);
+    addLine("");
+    addLine(chalk.bold("> ") + trimmed);
     setInput("");
     setStreaming(true);
     setThinking(true);
@@ -252,15 +252,13 @@ export function ChatUI({
         accumulated = result ?? "";
       }
 
-      // Commit output — render markdown so **bold**, headings, lists,
-      // inline code, and LaTeX all render as styled ANSI rather than
-      // showing raw markers like "**text**".
-      const headerLine = chalk.magenta("◆") + chalk.gray(" Skeleton");
+      // Render with Claude Code style: ⎿ connector + indented content
       const rendered = renderMarkdown(accumulated);
-      addLines([headerLine, rendered, chalk.gray("─".repeat(60))]);
+      const indented = rendered.split("\n").map(l => "     " + l).join("\n");
+      addLines(["", chalk.dim("  ⎿") + indented, ""]);
     } catch (err) {
       const msg = (err as Error).message;
-      addLine(chalk.red(`  ✗ ${msg}`));
+      addLine(chalk.dim("  ⎿  ") + chalk.red(`✗ ${msg}`));
     } finally {
       setStreaming(false);
       setStreamText("");
@@ -355,7 +353,7 @@ export function ChatUI({
               const ok = agent.resumeBranch(item.id.replace("branch:", ""));
               if (ok) {
                 addLine(chalk.green(`  ✓ Resumed branch "${item.label}"`));
-                addLine(chalk.gray("─".repeat(60)));
+                addLine("");
               } else {
                 addLine(chalk.red(`  ✗ Failed to resume "${item.label}"`));
               }
@@ -369,26 +367,26 @@ export function ChatUI({
               }
 
               // Render conversation history
-              addLine(chalk.cyan("  ┌─ Previous Conversation ─────────────────────────"));
+              addLine(chalk.dim("  ┌─ Previous Conversation ─────────────"));
               for (const msg of messages) {
                 if (msg.role === "user") {
                   const preview = (msg.content || "").replace(/\n/g, " ").slice(0, 120);
-                  addLine(chalk.green("  │ ❯ ") + preview);
+                  addLine(chalk.bold("  │ > ") + preview);
                 } else if (msg.role === "assistant") {
                   const preview = (msg.content || "").replace(/\n/g, " ").slice(0, 120);
-                  addLine(chalk.magenta("  │ ◆ ") + preview);
+                  addLine(chalk.dim("  │ ⎿ ") + preview);
                 } else if (msg.role === "tool") {
                   const toolName = (msg as any).toolName || (msg as any).tool_name || "tool";
-                  addLine(chalk.gray(`  │   ┊ ${toolName}`));
+                  addLine(chalk.dim(`  │   ⎿ ${toolName}`));
                 }
               }
-              addLine(chalk.cyan("  └──────────────────────────────────────────────────"));
+              addLine(chalk.dim("  └─────────────────────────────────────"));
               addLine("");
 
               // Inject history into agent so next message continues the conversation
               agent.loadMessages(messages);
-              addLine(chalk.green(`  ✓ Resumed session "${item.label}" (${messages.length} messages)`));
-              addLine(chalk.gray("─".repeat(60)));
+              addLine(chalk.green(`  ✓ Resumed "${item.label}" (${messages.length} messages)`));
+              addLine("");
             }
           }}
           onCancel={() => {
@@ -425,47 +423,25 @@ export function ChatUI({
         )}
       </Box>
 
-      {/* Status bar — density controlled by agent.statusBarMode */}
-      <Box borderStyle="single" borderColor="gray" paddingLeft={1} paddingRight={1}>
-        <Text color="magenta">◆</Text>
-        <Text> </Text>
-        <Text color="cyan">{shortModel}</Text>
+      {/* Status bar — minimal */}
+      <Box paddingLeft={1} paddingRight={1}>
+        <Text color="gray">{shortModel}</Text>
         {agent.statusBarMode !== "compact" && (
           <>
-            <Text color="gray"> │ </Text>
-            <Text color="green">T:{toolCount}</Text>
-            <Text color="gray"> │ </Text>
-            <Text color="yellow">M:{mcpCount}</Text>
+            <Text color="gray"> · </Text>
+            <Text color="gray">{toolCount} tools</Text>
             {ctxProgress && (
               <>
-                <Text color="gray"> │ </Text>
+                <Text color="gray"> · </Text>
                 <Text color={contextBarColor(ctxProgress.percent)}>
-                  {buildContextBar(ctxProgress.percent, 8)}
-                </Text>
-                <Text> </Text>
-                <Text color="gray">
-                  {formatTokenCount(ctxProgress.usedTokens)}/{formatTokenCount(ctxProgress.contextWindow)}
-                </Text>
-                <Text color={contextBarColor(ctxProgress.percent)}>
-                  {" "}{ctxProgress.percent}%
+                  {formatTokenCount(ctxProgress.usedTokens)}/{formatTokenCount(ctxProgress.contextWindow)} ({ctxProgress.percent}%)
                 </Text>
               </>
             )}
           </>
         )}
-        {agent.statusBarMode === "detailed" && (
-          <>
-            <Text color="gray"> │ </Text>
-            <Text color="blue">P:{agent.getPersonality().getActiveName()}</Text>
-            <Text color="gray"> │ </Text>
-            <Text color="magenta">S:{agent.skin.getActiveName()}</Text>
-            {ctxProgress && (
-              <Text color="gray"> │ {formatTokenCount(ctxProgress.usedTokens)}</Text>
-            )}
-          </>
-        )}
-        {streaming && <Text color="gray"> │ </Text>}
-        {streaming && <Text color="cyan">⏳</Text>}
+        {streaming && <Text color="gray"> · </Text>}
+        {streaming && <Text color="yellow">●</Text>}
       </Box>
 
       {/* Slash command suggestions — vertical list like Claude Code */}
@@ -556,11 +532,11 @@ export function ChatUI({
         );
       })()}
 
-      {/* Input area — fixed at bottom with box border */}
-      <Box borderStyle="round" borderColor="gray" paddingLeft={1} paddingRight={1}>
-        <Text color="cyan" bold>❯ </Text>
+      {/* Input area — clean minimal prompt */}
+      <Box paddingLeft={1} paddingRight={1}>
+        <Text color="white" bold>{"> "}</Text>
         <Text>{input}</Text>
-        <Text backgroundColor="cyan"> </Text>
+        <Text color="gray">{"█"}</Text>
       </Box>
     </Box>
   );

@@ -273,8 +273,7 @@ export async function processCommandAsync(
       return cmdSkills(ctx, adapter, parts);
 
     case "mcp":
-      adapter.addLine(chalk.gray("  Use /tools to see available tools including MCP-provided ones."));
-      return true;
+      return cmdMcp(ctx, adapter, parts);
 
     case "curator":
       return cmdCurator(ctx, adapter);
@@ -1437,12 +1436,90 @@ function cmdReloadMcp(ctx: CommandContext, adapter: OutputAdapter): boolean {
   return true;
 }
 
+function cmdMcp(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const sub = parts[1];
+  const name = parts.slice(2).join(" ");
+  const agent = ctx.agent;
+  const mcpTools = agent.getMcpServerTools();
+
+  if (!sub || sub === "list") {
+    const entries = [...mcpTools.entries()] as [string, { toolNames: string[] }][];
+    if (entries.length === 0) {
+      adapter.addLine(chalk.gray("  No MCP servers connected."));
+      adapter.addLine(chalk.gray("  Configure in skeleton.yaml under mcp_servers."));
+      return true;
+    }
+    adapter.addLines([
+      chalk.cyan("  Connected MCP servers:"),
+      ...entries.map(([serverName, info]) => {
+        const toolCount = (info as any).toolNames?.length ?? 0;
+        return `    ${chalk.green("●")} ${chalk.white(serverName)}  ${chalk.gray(`${toolCount} tools`)}`;
+      }),
+      "",
+      chalk.gray("  /mcp enable <name>    — connect a builtin server"),
+      chalk.gray("  /mcp disable <name>   — disconnect a server"),
+      chalk.gray("  /mcp reconnect <name> — restart a server"),
+    ]);
+    return true;
+  }
+
+  if (sub === "enable") {
+    if (!name) {
+      const { listBuiltinMcpServersByCategory } = require("../mcp/index.js") as typeof import("../mcp/index.js");
+      const categories = listBuiltinMcpServersByCategory();
+      adapter.addLines([
+        chalk.cyan("  Available MCP servers:"),
+        ...Object.entries(categories).flatMap(([cat, servers]) => [
+          chalk.yellow(`  ${cat}:`),
+          ...(servers as any[]).map((s: any) => `    ${chalk.gray("○")} ${s.name} — ${s.description ?? ""}`),
+        ]),
+      ]);
+      return true;
+    }
+    adapter.addLine(chalk.yellow(`  ⏳ Enabling "${name}"...`));
+    agent.addMcpServer(name, { command: name }).then(({ added, warnings }) => {
+      if (added.length > 0) adapter.addLine(chalk.green(`  ✓ Enabled "${name}" — ${added.length} tools`));
+      if (warnings) for (const w of warnings) adapter.addLine(chalk.yellow(`    ⚠ ${w}`));
+    }).catch((err: Error) => adapter.addLine(chalk.red(`  ✗ ${err.message}`)));
+    return true;
+  }
+
+  if (sub === "disable") {
+    if (!name) { adapter.addLine(chalk.gray("  Usage: /mcp disable <name>")); return true; }
+    agent.removeMcpServer(name).then(() => {
+      adapter.addLine(chalk.green(`  ✓ Disabled "${name}"`));
+    }).catch((err: Error) => adapter.addLine(chalk.red(`  ✗ ${err.message}`)));
+    return true;
+  }
+
+  if (sub === "reconnect") {
+    if (!name) { adapter.addLine(chalk.gray("  Usage: /mcp reconnect <name>")); return true; }
+    adapter.addLine(chalk.yellow(`  ⏳ Reconnecting "${name}"...`));
+    agent.removeMcpServer(name).then(() => agent.addMcpServer(name, { command: name }))
+      .then(({ added }) => adapter.addLine(chalk.green(`  ✓ Reconnected "${name}" — ${added.length} tools`)))
+      .catch((err: Error) => adapter.addLine(chalk.red(`  ✗ ${err.message}`)));
+    return true;
+  }
+
+  adapter.addLine(chalk.gray("  Usage: /mcp [list|enable|disable|reconnect] [name]"));
+  return true;
+}
+
 function cmdReloadSkills(ctx: CommandContext, adapter: OutputAdapter): boolean {
   const skillReg = ctx.agent.getSkillRegistry();
+  const before = new Set(skillReg.list().map(s => s.name));
   try {
-    skillReg.rescan?.();
-    const count = skillReg.list().length;
-    adapter.addLine(chalk.green(`  ✓ Skills reloaded — ${count} skill(s) found`));
+    skillReg.loadFromDisk();
+    const after = skillReg.list();
+    const afterNames = new Set(after.map(s => s.name));
+    const added = [...afterNames].filter(n => !before.has(n));
+    const removed = [...before].filter(n => !afterNames.has(n));
+
+    const lines = [chalk.green(`  ✓ Skills reloaded — ${after.length} skill(s) found`)];
+    if (added.length > 0) lines.push(chalk.green(`    + Added: ${added.join(", ")}`));
+    if (removed.length > 0) lines.push(chalk.red(`    - Removed: ${removed.join(", ")}`));
+    if (added.length === 0 && removed.length === 0) lines.push(chalk.gray("    No changes."));
+    adapter.addLines(lines);
   } catch (err) {
     adapter.addLine(chalk.red(`  ✗ Skills reload failed: ${(err as Error).message}`));
   }

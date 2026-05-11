@@ -16,6 +16,10 @@ export interface SkillDef {
   category: string;
   userInvocable: boolean;
   agentCreated?: boolean;
+  /** OS platforms this skill supports (empty = all) */
+  platforms?: string[];
+  /** Absolute path to the skill directory on disk */
+  skillDir?: string;
   content: () => string;
   /** Tier 3: list available resource files */
   listResources?: () => string[];
@@ -33,14 +37,31 @@ interface CatalogCache {
 export class SkillRegistry {
   private skills = new Map<string, SkillDef>();
 
-  /** Discovery paths: project-level + user-level */
+  /** Discovery paths: project-level + user-level + external */
   private projectSkillDir: string;
   private userSkillDir: string;
+  private externalDirs: string[] = [];
+  private disabledSkills: Set<string> = new Set();
   private catalogCache: CatalogCache | null = null;
 
   constructor(projectSkillDir?: string, userSkillDir?: string) {
     this.projectSkillDir = projectSkillDir ?? path.join(process.cwd(), ".agents", "skills");
     this.userSkillDir = userSkillDir ?? path.join(os.homedir(), ".skeleton", "skills");
+  }
+
+  /** Set external skill directories (from config.yaml skills.external_dirs) */
+  setExternalDirs(dirs: string[]): void {
+    this.externalDirs = dirs.filter(d => fs.existsSync(d));
+  }
+
+  /** Set disabled skill names (from config.yaml skills.disabled) */
+  setDisabledSkills(names: string[]): void {
+    this.disabledSkills = new Set(names.map(n => n.trim().toLowerCase()));
+  }
+
+  /** Check if a skill name is disabled */
+  isDisabled(name: string): boolean {
+    return this.disabledSkills.has(name.toLowerCase());
   }
 
   register(skill: SkillDef): void {
@@ -98,14 +119,19 @@ export class SkillRegistry {
     return this.userSkillDir;
   }
 
-  /** Load skills from both project-level and user-level directories */
+  /** Load skills from project, user, and external directories */
   loadFromDisk(): number {
     let count = 0;
 
-    // User-level skills (lower priority)
+    // External directories (lowest priority)
+    for (const dir of this.externalDirs) {
+      count += this.loadFromDirectory(dir, "external");
+    }
+
+    // User-level skills
     count += this.loadFromDirectory(this.userSkillDir, "user");
 
-    // Project-level skills (higher priority — override user-level by name)
+    // Project-level skills (highest priority — override by name)
     count += this.loadFromDirectory(this.projectSkillDir, "project");
 
     return count;
@@ -117,46 +143,79 @@ export class SkillRegistry {
     let count = 0;
 
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
       const skillPath = path.join(dir, entry.name);
 
       if (entry.isDirectory()) {
-        // agentskills.io: skill-name/SKILL.md
         const skillMd = path.join(skillPath, "SKILL.md");
         if (fs.existsSync(skillMd)) {
           try {
             const raw = fs.readFileSync(skillMd, "utf-8");
             const parsed = parseSkillMd(raw);
-            if (parsed) {
-              const instructionsDir = path.join(skillPath, "instructions");
-              const resourcesDir = path.join(skillPath, "resources");
+            if (!parsed) continue;
 
-              this.register({
-                ...parsed,
-                agentCreated: true,
-                content: () => {
-                  const current = fs.readFileSync(skillMd, "utf-8");
-                  const p = parseSkillMd(current);
-                  let body = p?.body ?? current;
-                  // Append instructions/ files if they exist
-                  if (fs.existsSync(instructionsDir)) {
-                    for (const f of fs.readdirSync(instructionsDir).filter((n) => n.endsWith(".md"))) {
-                      body += `\n\n---\n## ${f}\n${fs.readFileSync(path.join(instructionsDir, f), "utf-8")}`;
+            // Disabled check
+            if (this.isDisabled(parsed.name)) continue;
+
+            // Platform filter
+            if (parsed.platforms && parsed.platforms.length > 0) {
+              if (!matchesPlatform(parsed.platforms)) continue;
+            }
+
+            const instructionsDir = path.join(skillPath, "instructions");
+            const resourcesDir = path.join(skillPath, "resources");
+            const referencesDir = path.join(skillPath, "references");
+            const templatesDir = path.join(skillPath, "templates");
+            const scriptsDir = path.join(skillPath, "scripts");
+
+            this.register({
+              ...parsed,
+              agentCreated: true,
+              skillDir: skillPath,
+              content: () => {
+                const current = fs.readFileSync(skillMd, "utf-8");
+                const p = parseSkillMd(current);
+                let body = p?.body ?? current;
+
+                // Append instructions/ files
+                if (fs.existsSync(instructionsDir)) {
+                  for (const f of fs.readdirSync(instructionsDir).filter((n) => n.endsWith(".md"))) {
+                    body += `\n\n---\n## ${f}\n${fs.readFileSync(path.join(instructionsDir, f), "utf-8")}`;
+                  }
+                }
+
+                // Inject supporting files listing
+                const supportFiles = discoverSupportFiles(skillPath);
+                if (supportFiles.length > 0) {
+                  body += `\n\n[Skill directory: ${skillPath}]\n`;
+                  body += "[Supporting files:]\n";
+                  for (const sf of supportFiles) {
+                    body += `- ${sf}  →  ${path.join(skillPath, sf)}\n`;
+                  }
+                  body += `\nRun scripts by absolute path. Load references with skill_view(name="${parsed.name}", file_path="<path>").`;
+                }
+
+                return body;
+              },
+              listResources: () => {
+                const files: string[] = [];
+                for (const subdir of [resourcesDir, referencesDir, templatesDir, scriptsDir]) {
+                  if (fs.existsSync(subdir)) {
+                    for (const f of fs.readdirSync(subdir)) {
+                      const rel = path.relative(skillPath, path.join(subdir, f));
+                      files.push(rel);
                     }
                   }
-                  return body;
-                },
-                listResources: () => {
-                  if (!fs.existsSync(resourcesDir)) return [];
-                  return fs.readdirSync(resourcesDir);
-                },
-                loadResource: (fileName: string) => {
-                  const fp = path.join(resourcesDir, fileName);
-                  if (!fs.existsSync(fp)) return null;
-                  return fs.readFileSync(fp, "utf-8");
-                },
-              });
-              count++;
-            }
+                }
+                return files;
+              },
+              loadResource: (fileName: string) => {
+                const fp = path.join(skillPath, fileName);
+                if (!fs.existsSync(fp) || !fp.startsWith(skillPath)) return null;
+                return fs.readFileSync(fp, "utf-8");
+              },
+            });
+            count++;
           } catch {
             // skip malformed
           }
@@ -166,17 +225,22 @@ export class SkillRegistry {
         try {
           const raw = fs.readFileSync(skillPath, "utf-8");
           const parsed = parseSkillMd(raw);
-          if (parsed) {
-            this.register({
-              ...parsed,
-              agentCreated: true,
-              content: () => {
-                const current = fs.readFileSync(skillPath, "utf-8");
-                return parseSkillMd(current)?.body ?? current;
-              },
-            });
-            count++;
+          if (!parsed) continue;
+          if (this.isDisabled(parsed.name)) continue;
+          if (parsed.platforms && parsed.platforms.length > 0) {
+            if (!matchesPlatform(parsed.platforms)) continue;
           }
+
+          this.register({
+            ...parsed,
+            agentCreated: true,
+            skillDir: path.dirname(skillPath),
+            content: () => {
+              const current = fs.readFileSync(skillPath, "utf-8");
+              return parseSkillMd(current)?.body ?? current;
+            },
+          });
+          count++;
         } catch {
           // skip
         }
@@ -312,8 +376,8 @@ export interface SkillConfig {
 }
 
 /** Parse a SKILL.md file with YAML frontmatter */
-function parseSkillMd(raw: string): Omit<SkillDef, "agentCreated" | "content" | "listResources" | "loadResource"> & { body: string } | null {
-  const match = raw.match(/^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/);
+function parseSkillMd(raw: string): Omit<SkillDef, "agentCreated" | "content" | "listResources" | "loadResource" | "skillDir"> & { body: string } | null {
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/);
   if (!match) return null;
 
   const frontmatter = match[1];
@@ -323,6 +387,7 @@ function parseSkillMd(raw: string): Omit<SkillDef, "agentCreated" | "content" | 
   let description = "";
   let category = "general";
   let userInvocable = false;
+  let platforms: string[] = [];
 
   for (const line of frontmatter.split("\n")) {
     const [key, ...rest] = line.split(":");
@@ -331,8 +396,41 @@ function parseSkillMd(raw: string): Omit<SkillDef, "agentCreated" | "content" | 
     else if (key === "description") description = val;
     else if (key === "category") category = val;
     else if (key === "userInvocable") userInvocable = val === "true";
+    else if (key === "platforms") {
+      // Parse [macos, linux] or "macos, linux"
+      const cleaned = val.replace(/[\[\]]/g, "");
+      platforms = cleaned.split(",").map(s => s.trim()).filter(Boolean);
+    }
   }
 
   if (!name) return null;
-  return { name, description, category, userInvocable, body };
+  return { name, description, category, userInvocable, platforms: platforms.length > 0 ? platforms : undefined, body };
+}
+
+/** Check if current OS matches the skill's platform requirements */
+function matchesPlatform(platforms: string[]): boolean {
+  const current = process.platform;
+  const map: Record<string, string> = {
+    macos: "darwin", linux: "linux", windows: "win32",
+  };
+  return platforms.some(p => {
+    const mapped = map[p.toLowerCase()] ?? p.toLowerCase();
+    return current.startsWith(mapped);
+  });
+}
+
+/** Discover supporting files (references/templates/scripts/assets) in a skill dir */
+function discoverSupportFiles(skillDir: string): string[] {
+  const files: string[] = [];
+  for (const subdir of ["references", "templates", "scripts", "assets"]) {
+    const full = path.join(skillDir, subdir);
+    if (!fs.existsSync(full)) continue;
+    for (const f of fs.readdirSync(full)) {
+      const fp = path.join(full, f);
+      if (fs.statSync(fp).isFile()) {
+        files.push(`${subdir}/${f}`);
+      }
+    }
+  }
+  return files;
 }

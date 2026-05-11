@@ -175,14 +175,11 @@ Legacy (still works):
   let agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
   agent.setMcpClients(mcpClients, mcpServerToolMap);
 
-  // Print header above the ink UI
+  // Print header — logo + model info
+  console.log("");
   console.log(renderHeader(config.llm.model, process.cwd()));
-  console.log(renderDivider());
-  console.log(chalk.gray(`  Tools: ${tools.length} | MCP clients: ${mcpClients.length}`));
-  // Random startup tip from 100-tip rotation
-  const { getRandomTip } = await import("@skeleton/core");
-  console.log(chalk.gray(`  ${getRandomTip()}`));
-  console.log(renderDivider());
+  console.log(chalk.gray(`  ${tools.length} tools · ${mcpClients.length} MCP`));
+  console.log("");
 
   // Check if raw mode (ink) is supported — requires a real TTY
   const useInk = process.stdin.isTTY && process.stdout.isTTY;
