@@ -10,7 +10,7 @@
  */
 
 import React, { useState, useCallback } from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput } from "@skeleton/ink";
 import chalk from "chalk";
 
 export interface PickerItem {

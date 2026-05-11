@@ -10,10 +10,10 @@
   },
   "dependencies": {
     "@skeleton/core": "workspace:*",
+    "@skeleton/ink": "workspace:*",
     "@types/react": "^19.2.14",
     "chalk": "^5.4.0",
     "cli-highlight": "^2.1.11",
-    "ink": "^7.0.2",
     "marked": "^18.0.3",
     "marked-terminal": "^7.3.0",
     "react": "^19.2.6"

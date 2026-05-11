@@ -13,7 +13,8 @@
  */
 
 import React, { useState, useCallback, useRef, useEffect } from "react";
-import { render, Box, Text, Static, useInput, useApp } from "ink";
+import { wrappedRender as render, Box, Text, useInput, useApp, AlternateScreen, ScrollBox } from "@skeleton/ink";
+import type { ScrollBoxHandle } from "@skeleton/ink";
 import chalk from "chalk";
 import type { Agent, MemoryStore, UserProfile, SessionDB, CronStore, CommandContext } from "@skeleton/core";
 import {
@@ -92,7 +93,7 @@ export function ChatUI({
       const line = formatToolCompletion(info.name, info.args, info.duration, {
         isError: info.isError, useColor: true,
       });
-      addLine(chalk.dim("  ⎿  ") + line);
+      addLine(chalk.dim("  ⎿ ") + line);
 
       // "verbose": also show args and result preview
       if (mode === "verbose") {
@@ -194,7 +195,7 @@ export function ChatUI({
           });
           if (firstToken) accumulated = result ?? "";
           const rendered = renderMarkdown(accumulated);
-          addLines(["", chalk.dim("  ⎿  ") + rendered.split("\n").join("\n     "), ""]);
+          addLines([chalk.dim("  ⎿ ") + rendered.split("\n").join("\n    "), ""]);
         } catch (err) {
           addLine(chalk.dim("  ⎿  ") + chalk.red(`✗ ${(err as Error).message}`));
         } finally {
@@ -252,10 +253,8 @@ export function ChatUI({
         accumulated = result ?? "";
       }
 
-      // Render with Claude Code style: ⎿ connector + indented content
       const rendered = renderMarkdown(accumulated);
-      const indented = rendered.split("\n").map(l => "     " + l).join("\n");
-      addLines(["", chalk.dim("  ⎿") + indented, ""]);
+      addLines([chalk.dim("  ⎿ ") + rendered.split("\n").join("\n    "), ""]);
     } catch (err) {
       const msg = (err as Error).message;
       addLine(chalk.dim("  ⎿  ") + chalk.red(`✗ ${msg}`));
@@ -272,7 +271,21 @@ export function ChatUI({
 
   // Key input handler
   useInput((ch, key) => {
-    if (isProcessing.current || pickerItems !== null) return;
+    // Allow typing even during processing (queued for next turn)
+    if (pickerItems !== null) return;
+
+    // During processing: only allow typing into input buffer (no submit)
+    if (isProcessing.current) {
+      if (key.backspace) {
+        setInput(prev => prev.slice(0, -1));
+      } else if (ch && !key.ctrl && !key.meta && !key.return) {
+        setInput(prev => {
+          const next = prev + ch;
+          return next.length > 500 ? next.slice(0, 500) : next;
+        });
+      }
+      return;
+    }
 
     if (key.return) {
       // If command suggestions are visible and one is selected, fill it in
@@ -413,13 +426,15 @@ export function ChatUI({
         )}
       </Static>
 
-      {/* Live streaming preview — the only thing that updates per token */}
-      <Box flexDirection="column" marginBottom={1}>
-        {streamText && streamText.split("\n").map((sub, j) => (
-          <Text key={`stream-${j}`}>{sub}</Text>
-        ))}
+      {/* Live streaming preview */}
+      <Box flexDirection="column">
+        {streamText && (
+          <Box paddingLeft={4}>
+            <Text wrap="wrap">{streamText}</Text>
+          </Box>
+        )}
         {thinking && !streamText && (
-          <Text key="thinking" color="cyan">  ⏳ Thinking...</Text>
+          <Text color="gray">{"    ⏳"}</Text>
         )}
       </Box>
 
@@ -520,8 +535,11 @@ export function ChatUI({
               const isSelected = i === selectedCmd;
               const padded = cmd.name.padEnd(maxNameLen + 2);
               return (
-                <Text key={cmd.name} dimColor={!isSelected}>
-                  <Text color={isSelected ? "cyan" : "white"} bold={isSelected}>
+                <Text key={cmd.name}>
+                  <Text color={isSelected ? "cyan" : "gray"}>
+                    {isSelected ? "❯ " : "  "}
+                  </Text>
+                  <Text color={isSelected ? "white" : "gray"} bold={isSelected}>
                     {`/${padded}`}
                   </Text>
                   <Text color="gray">{cmd.description}</Text>
