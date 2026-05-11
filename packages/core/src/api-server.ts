@@ -123,9 +123,9 @@ export class ApiServer {
     const body = await this.readBody(req);
     const request = JSON.parse(body) as ChatRequest;
 
-    // Extract last user message
-    const userMessages = request.messages.filter(m => m.role === "user");
-    const lastUserMsg = userMessages[userMessages.length - 1]?.content ?? "";
+    // Session continuity: honor X-Skeleton-Session-Id header for persistent conversations
+    const sessionHeader = req.headers["x-skeleton-session-id"];
+    const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
 
     const agent = new Agent(
       this.config.agentConfig,
@@ -133,54 +133,74 @@ export class ApiServer {
       this.userProfile ?? undefined,
     );
 
+    // Load full conversation history from request (messages minus last user turn)
+    const historyMessages = request.messages.slice(0, -1).filter(m => m.role !== "system");
+    if (historyMessages.length > 0) {
+      agent.loadMessages(historyMessages);
+    }
+
+    // Extract last user message as the new turn input
+    const lastMsg = request.messages[request.messages.length - 1];
+    const userInput = lastMsg?.role === "user" ? lastMsg.content : "";
+
     this.activeRequests++;
 
     try {
       if (request.stream) {
-        // SSE streaming
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
+          ...(sessionId ? { "X-Skeleton-Session-Id": sessionId } : {}),
         });
 
-        const result = await agent.runStream(lastUserMsg, (token) => {
+        await agent.runStream(userInput, (token) => {
           const chunk = {
             id: `chatcmpl-${Date.now().toString(36)}`,
             object: "chat.completion.chunk",
+            model: this.config.agentConfig.llm.model,
             choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
           };
           res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         });
 
-        // Final chunk
         const finalChunk = {
           id: `chatcmpl-${Date.now().toString(36)}`,
           object: "chat.completion.chunk",
+          model: this.config.agentConfig.llm.model,
           choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
         };
         res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
         res.write("data: [DONE]\n\n");
         res.end();
       } else {
-        // Non-streaming
-        const result = await agent.run(lastUserMsg);
+        const result = await agent.run(userInput);
+        const usage = agent.getUsage();
         const response = {
           id: `chatcmpl-${Date.now().toString(36)}`,
           object: "chat.completion",
+          model: this.config.agentConfig.llm.model,
+          created: Math.floor(Date.now() / 1000),
           choices: [{
             index: 0,
             message: { role: "assistant", content: result },
             finish_reason: "stop",
           }],
-          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+          usage: {
+            prompt_tokens: usage.last.promptTokens,
+            completion_tokens: usage.last.completionTokens,
+            total_tokens: usage.last.promptTokens + usage.last.completionTokens,
+          },
         };
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          ...(sessionId ? { "X-Skeleton-Session-Id": sessionId } : {}),
+        });
         res.end(JSON.stringify(response));
       }
     } finally {
       this.activeRequests--;
-      await agent.close();
+      await agent.close({ closeMcp: false });
     }
   }
 

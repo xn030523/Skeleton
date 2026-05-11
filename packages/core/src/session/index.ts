@@ -114,6 +114,28 @@ export class SessionDB {
       );
   }
 
+  /** Atomically replace all messages for a session in a single transaction */
+  replaceMessages(sessionId: string, messages: Message[]): void {
+    const deleteStmt = this.db.prepare("DELETE FROM messages WHERE session_id = ?");
+    const insertStmt = this.db.prepare(
+      "INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls_json, tool_name) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    const txn = this.db.transaction((sid: string, msgs: Message[]) => {
+      deleteStmt.run(sid);
+      for (const msg of msgs) {
+        insertStmt.run(
+          sid,
+          msg.role,
+          msg.content,
+          msg.toolCallId ?? null,
+          msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
+          null,
+        );
+      }
+    });
+    txn(sessionId, messages);
+  }
+
   getMessages(sessionId: string): Message[] {
     const rows = this.db
       .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC")
@@ -162,7 +184,7 @@ export class SessionDB {
     try {
       const results = this.db
         .prepare(
-          `SELECT m.session_id, m.content, m.role, m.created_at
+          `SELECT m.session_id AS sessionId, m.content, m.role, m.created_at AS createdAt
            FROM messages_fts f
            JOIN messages m ON m.id = f.rowid
            WHERE messages_fts MATCH ?
@@ -179,7 +201,7 @@ export class SessionDB {
     try {
       return this.db
         .prepare(
-          `SELECT m.session_id, m.content, m.role, m.created_at
+          `SELECT m.session_id AS sessionId, m.content, m.role, m.created_at AS createdAt
            FROM messages_fts_trigram f
            JOIN messages m ON m.id = f.rowid
            WHERE messages_fts_trigram MATCH ?
@@ -231,14 +253,17 @@ export class SessionDB {
   recentSessions(limit = 10): Array<{ id: string; title: string | null; createdAt: string; messageCount: number }> {
     return this.db
       .prepare(
-        `SELECT s.id, s.title, s.created_at, COUNT(m.id) as message_count
+        `SELECT s.id, s.title, s.created_at, COUNT(m.id) as message_count,
+                (SELECT SUBSTR(m2.content, 1, 50) FROM messages m2
+                 WHERE m2.session_id = s.id AND m2.role = 'user'
+                 ORDER BY m2.id ASC LIMIT 1) as first_user_msg
          FROM sessions s
          LEFT JOIN messages m ON m.session_id = s.id
          GROUP BY s.id
          ORDER BY s.created_at DESC
          LIMIT ?`,
       )
-      .all(limit) as Array<{ id: string; title: string | null; createdAt: string; messageCount: number }>;
+      .all(limit) as any;
   }
 
   /** List all sessions with metadata (for Insights engine) */

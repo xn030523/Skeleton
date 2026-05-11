@@ -9,6 +9,7 @@ import { disassembleTool } from "./disassemble.js";
 import { webSearchTool } from "../web-tools.js";
 import { webFetchTool } from "./web-fetch.js";
 import { sandboxTerminalTool } from "../../sandbox.js";
+import { browserTool } from "../browser-tool.js";
 
 export function builtInTools(): ToolDef[] {
   const tools: ToolDef[] = [
@@ -22,6 +23,7 @@ export function builtInTools(): ToolDef[] {
     webSearchTool(),
     webFetchTool(),
     sandboxTerminalTool(),
+    browserTool(),
   ];
 
   const toolsetMap: Record<string, string> = {
@@ -29,6 +31,7 @@ export function builtInTools(): ToolDef[] {
     entropy: "re", disassemble: "re",
     web_search: "web", web_fetch: "web",
     terminal: "system",
+    browser: "browser",
   };
 
   const emojiMap: Record<string, string> = {
@@ -36,6 +39,7 @@ export function builtInTools(): ToolDef[] {
     entropy: "📊", disassemble: "⚙️",
     web_search: "🌐", web_fetch: "📄",
     terminal: "💻",
+    browser: "🌍",
   };
 
   for (const t of tools) {
@@ -44,12 +48,6 @@ export function builtInTools(): ToolDef[] {
     }
     if (emojiMap[t.name]) {
       (t as { emoji?: string }).emoji = emojiMap[t.name];
-    }
-  }
-
-  for (const t of tools) {
-    if (toolsetMap[t.name]) {
-      (t as { toolset?: string }).toolset = toolsetMap[t.name];
     }
   }
 

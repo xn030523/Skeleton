@@ -1,0 +1,9 @@
+{
+  "name": "skeleton-agent",
+  "display_name": "Skeleton Agent",
+  "description": "Reverse engineering AI agent with ACP support",
+  "distribution": {
+    "type": "command",
+    "command": "skeleton acp"
+  }
+}

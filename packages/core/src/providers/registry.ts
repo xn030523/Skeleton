@@ -10,29 +10,23 @@
 
 import type { LLMConfig, Protocol } from "../types.js";
 
-export type ApiMode = "chat_completions" | "anthropic_messages" | "codex_responses" | "bedrock_converse";
+export type ApiMode = "chat_completions" | "anthropic_messages" | "codex_responses" | "bedrock_converse" | "gemini_native" | "gemini_cloudcode";
 
 export type AuthMode = "x-api-key" | "bearer" | "api-key";
 
 export interface ProviderQuirks {
   urlSuffix?: string;
   skipApiKey?: boolean;
-  /** Auth header mode: x-api-key (Anthropic default), bearer (OpenAI/MiniMax), api-key (Azure) */
   authMode?: AuthMode;
-  /** Custom HTTP headers to send with every request */
   customHeaders?: Record<string, string>;
-  /** Query parameters to append to base URL */
   queryParams?: Record<string, string>;
-  /** Third-party Anthropic-compatible endpoint (MiniMax, DeepSeek /anthropic, Kimi) */
   isThirdPartyAnthropic?: boolean;
-  /** Strip these Anthropic beta headers (MiniMax rejects some) */
   stripBetaHeaders?: string[];
-  /** Strip signed thinking blocks on third-party endpoints */
   stripSignedThinking?: boolean;
-  /** Maximum output tokens for this provider's default model */
   maxOutputTokens?: number;
-  /** Disable prompt caching for this endpoint */
   noCaching?: boolean;
+  /** Extra body fields to merge into every request (e.g., OpenRouter caching) */
+  extraBody?: Record<string, unknown>;
 }
 
 export interface ProviderProfile {
@@ -123,6 +117,10 @@ export function apiModeToProtocol(apiMode: ApiMode): Protocol {
     case "codex_responses":
       return "openai";
     case "bedrock_converse":
-      return "openai"; // Bedrock uses its own transport, protocol field is nominal
+      return "openai";
+    case "gemini_native":
+      return "openai"; // Gemini uses its own transport, protocol field is nominal
+    case "gemini_cloudcode":
+      return "openai"; // Vertex AI uses its own transport
   }
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ParseResult } from "./index.js";
-import { registerParser } from "./index.js";
+import type { ParseResult } from "./base.js";
+import { registerParser } from "./base.js";
 
 const TC_OPEN = "\u{1F3C3}";
 const TC_CLOSE = "\u{1F3C4}";

@@ -5,6 +5,11 @@
  * Plugins can:
  * - Register tools into the ToolRegistry
  * - Register hooks into the HookRegistry
+ * - Register providers into the ProviderRegistry
+ * - Register slash commands dispatched through processCommandAsync
+ * - Register tool-result transformers (rewrite output before messages store)
+ * - Register terminal-output transformers (specialized transform for terminal)
+ * - Dispatch tools directly (call other registered tools)
  * - Provide skills
  * - Run init/destroy lifecycle callbacks
  */
@@ -14,34 +19,67 @@ import path from "node:path";
 import os from "node:os";
 import type { ToolRegistry } from "./tools/registry.js";
 import type { HookRegistry, HookEvent, HookHandler } from "./hooks.js";
-import type { SkillDef } from "./skills/registry.js";
 
 export interface PluginManifest {
   name: string;
   version: string;
   description?: string;
-  /** Hook event → handler function path (relative to plugin dir) */
   hooks?: Record<string, string[]>;
-  /** Tool function paths (relative to plugin dir) */
   tools?: string[];
-  /** Skill names this plugin provides */
   skills?: string[];
-  /** Init script path (runs on load) */
   init?: string;
-  /** Destroy script path (runs on unload) */
   destroy?: string;
 }
+
+/** Slash command handler registered by plugins */
+export type PluginCommandHandler = (args: string, context: PluginContext) => Promise<string> | string;
+
+/** Tool result transformer — can rewrite a tool's output before it lands in messages */
+export type ToolResultTransformer = (
+  toolName: string,
+  args: Record<string, unknown>,
+  result: string,
+) => Promise<string | null> | string | null;
 
 export interface PluginContext {
   pluginDir: string;
   manifest: PluginManifest;
   logger: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
-  /** Register a tool from this plugin */
   registerTool: (name: string, description: string, fn: (args: Record<string, unknown>) => Promise<unknown>) => void;
-  /** Register a hook from this plugin */
   registerHook: (event: HookEvent, handler: HookHandler) => void;
-  /** Get a plugin-scoped data path for persistent storage */
+  registerProvider: (profile: {
+    name: string;
+    aliases?: string[];
+    apiMode: string;
+    baseUrl: string;
+    apiKeyEnvVars: string[];
+    defaultModel: string;
+    quirks?: Record<string, unknown>;
+  }) => void;
+  /** Register a slash command — becomes available as `/<plugin>.<cmd>` */
+  registerCommand: (name: string, description: string, handler: PluginCommandHandler) => void;
+  /** Register a tool-result transformer — filters/rewrites output of specified tools (or all if no filter) */
+  registerToolResultTransformer: (transformer: ToolResultTransformer, options?: { toolNames?: string[] }) => void;
+  /** Register a terminal-output transformer — specialized transform for terminal tool stdout */
+  registerTerminalOutputTransformer: (transformer: (output: string) => Promise<string | null> | string | null) => void;
+  /** Dispatch a tool directly — useful for composing tools within plugin logic */
+  dispatchTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   dataPath: (filename: string) => string;
+}
+
+export interface RegisteredPluginCommand {
+  pluginName: string;
+  name: string;
+  description: string;
+  fullName: string; // e.g. "myplugin.foo"
+  handler: PluginCommandHandler;
+  context: PluginContext;
+}
+
+interface RegisteredTransformer {
+  pluginName: string;
+  transformer: ToolResultTransformer;
+  toolFilter: Set<string> | null;
 }
 
 type LoadedPlugin = {
@@ -50,6 +88,9 @@ type LoadedPlugin = {
   dir: string;
   registeredTools: string[];
   registeredHooks: Array<{ event: HookEvent; name: string }>;
+  registeredCommands: string[];
+  registeredTransformers: ToolResultTransformer[];
+  registeredTerminalTransformers: Array<(o: string) => Promise<string | null> | string | null>;
 };
 
 export class PluginSystem {
@@ -59,28 +100,76 @@ export class PluginSystem {
   private toolRegistry: ToolRegistry | null = null;
   private hookRegistry: HookRegistry | null = null;
 
+  /** Plugin-registered slash commands (indexed by fullName) */
+  private commands = new Map<string, RegisteredPluginCommand>();
+  /** Plugin-registered tool-result transformers (applied in registration order) */
+  private toolResultTransformers: RegisteredTransformer[] = [];
+  /** Plugin-registered terminal-output transformers */
+  private terminalTransformers: Array<{ pluginName: string; transformer: (o: string) => Promise<string | null> | string | null }> = [];
+
   constructor(opts?: { pluginDir?: string; nodeModulesDir?: string }) {
     this.pluginDir = opts?.pluginDir ?? path.join(os.homedir(), ".skeleton", "plugins");
     this.nodeModulesDir = opts?.nodeModulesDir ?? path.join(process.cwd(), "node_modules");
   }
 
-  /** Inject the tool and hook registries for plugin registration */
   injectRegistries(tools: ToolRegistry, hooks: HookRegistry): void {
     this.toolRegistry = tools;
     this.hookRegistry = hooks;
   }
 
-  /** Scan both discovery sources and return discovered manifest paths */
+  /** List all plugin-registered slash commands (for CLI autocomplete / help) */
+  listCommands(): RegisteredPluginCommand[] {
+    return [...this.commands.values()];
+  }
+
+  /** Resolve a slash command by name (supports `plugin.cmd` full name or bare `cmd` if unambiguous) */
+  resolveCommand(name: string): RegisteredPluginCommand | null {
+    const direct = this.commands.get(name);
+    if (direct) return direct;
+    // Try bare name match
+    const matches = [...this.commands.values()].filter(c => c.name === name);
+    if (matches.length === 1) return matches[0];
+    return null;
+  }
+
+  /** Apply all registered tool-result transformers in sequence */
+  async applyToolResultTransformers(toolName: string, args: Record<string, unknown>, result: string): Promise<string> {
+    let current = result;
+    for (const reg of this.toolResultTransformers) {
+      if (reg.toolFilter && !reg.toolFilter.has(toolName)) continue;
+      try {
+        const transformed = await reg.transformer(toolName, args, current);
+        if (transformed != null) current = transformed;
+      } catch (err) {
+        console.warn(`Transformer from plugin "${reg.pluginName}" failed: ${(err as Error).message}`);
+      }
+    }
+    return current;
+  }
+
+  /** Apply all terminal-output transformers in sequence */
+  async applyTerminalTransformers(output: string): Promise<string> {
+    let current = output;
+    for (const reg of this.terminalTransformers) {
+      try {
+        const transformed = await reg.transformer(current);
+        if (transformed != null) current = transformed;
+      } catch (err) {
+        console.warn(`Terminal transformer from plugin "${reg.pluginName}" failed: ${(err as Error).message}`);
+      }
+    }
+    return current;
+  }
+
   discover(): string[] {
     const results: string[] = [];
 
-    // Scan node_modules/@skeleton-plugin-*
-    if (fs.existsSync(this.nodeModulesDir)) {
-      const dirs = fs.readdirSync(this.nodeModulesDir, { withFileTypes: true });
+    const scopeDir = path.join(this.nodeModulesDir, "@skeleton-plugin");
+    if (fs.existsSync(scopeDir)) {
+      const dirs = fs.readdirSync(scopeDir, { withFileTypes: true });
       for (const d of dirs) {
-        if (d.isDirectory() && d.name.startsWith("@skeleton-plugin-")) {
-          const pkgDir = path.join(this.nodeModulesDir, d.name);
-          const manifestPath = path.join(pkgDir, "skeleton-plugin.json");
+        if (d.isDirectory()) {
+          const manifestPath = path.join(scopeDir, d.name, "skeleton-plugin.json");
           if (fs.existsSync(manifestPath)) {
             results.push(manifestPath);
           }
@@ -88,7 +177,6 @@ export class PluginSystem {
       }
     }
 
-    // Scan .skeleton/plugins/
     if (fs.existsSync(this.pluginDir)) {
       const entries = fs.readdirSync(this.pluginDir, { withFileTypes: true });
       for (const e of entries) {
@@ -104,7 +192,6 @@ export class PluginSystem {
     return results;
   }
 
-  /** Load a plugin from a directory containing skeleton-plugin.json */
   async loadPlugin(dir: string): Promise<PluginManifest> {
     const manifestPath = path.join(dir, "skeleton-plugin.json");
     const raw = fs.readFileSync(manifestPath, "utf-8");
@@ -122,6 +209,12 @@ export class PluginSystem {
 
     const registeredTools: string[] = [];
     const registeredHooks: Array<{ event: HookEvent; name: string }> = [];
+    const registeredCommands: string[] = [];
+    const registeredTransformers: ToolResultTransformer[] = [];
+    const registeredTerminalTransformers: Array<(o: string) => Promise<string | null> | string | null> = [];
+
+    // Capture for closure reference; updated after plugin entry set
+    const getSelf = () => this.plugins.get(manifest.name);
 
     const context: PluginContext = {
       pluginDir: dir,
@@ -162,15 +255,70 @@ export class PluginSystem {
         registeredHooks.push({ event, name: hookName });
         context.logger.info(`Registered hook: ${event} (${hookName})`);
       },
+      registerProvider: (profile) => {
+        try {
+          const { registerProvider: regProv } = require("./providers/registry.js") as typeof import("./providers/registry.js");
+          regProv(profile as any);
+          context.logger.info(`Registered provider: ${profile.name}`);
+        } catch (err) {
+          context.logger.warn(`Failed to register provider "${profile.name}": ${(err as Error).message}`);
+        }
+      },
+      registerCommand: (name, description, handler) => {
+        const fullName = `${manifest.name}.${name}`;
+        if (this.commands.has(fullName)) {
+          context.logger.warn(`Command "${fullName}" already registered — overriding`);
+        }
+        this.commands.set(fullName, {
+          pluginName: manifest.name,
+          name,
+          description,
+          fullName,
+          handler,
+          context,
+        });
+        registeredCommands.push(fullName);
+        context.logger.info(`Registered command: /${fullName}`);
+      },
+      registerToolResultTransformer: (transformer, options) => {
+        const toolFilter = options?.toolNames ? new Set(options.toolNames) : null;
+        this.toolResultTransformers.push({
+          pluginName: manifest.name,
+          transformer,
+          toolFilter,
+        });
+        registeredTransformers.push(transformer);
+        const label = toolFilter ? [...toolFilter].join(",") : "all tools";
+        context.logger.info(`Registered tool-result transformer for: ${label}`);
+      },
+      registerTerminalOutputTransformer: (transformer) => {
+        this.terminalTransformers.push({ pluginName: manifest.name, transformer });
+        registeredTerminalTransformers.push(transformer);
+        context.logger.info(`Registered terminal-output transformer`);
+      },
+      dispatchTool: async (name, args) => {
+        if (!this.toolRegistry) {
+          throw new Error("Tool registry not available");
+        }
+        return this.toolRegistry.execute(name, args);
+      },
       dataPath: (filename) => {
         fs.mkdirSync(pluginDataDir, { recursive: true });
         return path.join(pluginDataDir, filename);
       },
     };
 
-    this.plugins.set(manifest.name, { manifest, context, dir, registeredTools, registeredHooks });
+    this.plugins.set(manifest.name, {
+      manifest,
+      context,
+      dir,
+      registeredTools,
+      registeredHooks,
+      registeredCommands,
+      registeredTransformers,
+      registeredTerminalTransformers,
+    });
 
-    // Run init script if specified
     if (manifest.init) {
       try {
         const initPath = path.join(dir, manifest.init);
@@ -189,12 +337,10 @@ export class PluginSystem {
     return manifest;
   }
 
-  /** Unload a previously loaded plugin by name — removes tools and hooks */
   async unloadPlugin(name: string): Promise<boolean> {
     const plugin = this.plugins.get(name);
     if (!plugin) return false;
 
-    // Run destroy script if specified
     if (plugin.manifest.destroy) {
       try {
         const destroyPath = path.join(plugin.dir, plugin.manifest.destroy);
@@ -209,21 +355,26 @@ export class PluginSystem {
       }
     }
 
-    // Unregister tools
     for (const toolName of plugin.registeredTools) {
       this.toolRegistry?.unregister(toolName);
     }
-
-    // Unregister hooks
     for (const hook of plugin.registeredHooks) {
       this.hookRegistry?.unregister(hook.name);
     }
+    for (const cmdName of plugin.registeredCommands) {
+      this.commands.delete(cmdName);
+    }
+    this.toolResultTransformers = this.toolResultTransformers.filter(
+      (r) => !plugin.registeredTransformers.includes(r.transformer),
+    );
+    this.terminalTransformers = this.terminalTransformers.filter(
+      (r) => !plugin.registeredTerminalTransformers.includes(r.transformer),
+    );
 
     this.plugins.delete(name);
     return true;
   }
 
-  /** Load all discovered plugins */
   async loadAll(): Promise<PluginManifest[]> {
     const manifests = this.discover();
     const loaded: PluginManifest[] = [];
@@ -238,17 +389,14 @@ export class PluginSystem {
     return loaded;
   }
 
-  /** Get a loaded plugin's context */
   getPlugin(name: string): PluginContext | undefined {
     return this.plugins.get(name)?.context;
   }
 
-  /** List all loaded plugin manifests */
   listLoaded(): PluginManifest[] {
     return [...this.plugins.values()].map((p) => p.manifest);
   }
 
-  /** Reload a plugin (unload + load) */
   async reloadPlugin(name: string): Promise<PluginManifest | null> {
     const plugin = this.plugins.get(name);
     if (!plugin) return null;
@@ -259,7 +407,6 @@ export class PluginSystem {
 }
 
 async function importInitScript(filePath: string): Promise<unknown> {
-  // Try dynamic import for ESM, fall back to require for CJS
   try {
     const mod = await import(`file://${filePath}`);
     return mod.default ?? mod;

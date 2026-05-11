@@ -109,12 +109,13 @@ export class AuxiliaryClient {
 
   /** Summarize text (e.g. conversation compression) */
   async summarize(text: string, instruction?: string): Promise<string> {
-    const prompt = instruction ?? "Produce a concise, information-dense summary. Preserve exact values (paths, IDs, hashes) verbatim.";
+    const systemPrompt = "You are a summarization assistant.";
+    const userInstruction = instruction ?? "Produce a concise, information-dense summary. Preserve exact values (paths, IDs, hashes) verbatim.";
     const messages: Message[] = [
-      { role: "user", content: `${prompt}\n\n${text}` },
+      { role: "user", content: `${userInstruction}\n\n${text}` },
     ];
     try {
-      const resp = await this.getTransport("compression").send(prompt, messages, NO_TOOLS);
+      const resp = await this.getTransport("compression").send(systemPrompt, messages, NO_TOOLS);
       return resp.content ?? "";
     } catch (err) {
       console.warn(`Auxiliary summarize failed: ${(err as Error).message}`);

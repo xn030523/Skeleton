@@ -1,11 +1,13 @@
 import chalk from "chalk";
+import { renderLatexMath } from "./latex.js";
 
 /**
  * Terminal Markdown renderer.
  *
  * Converts Markdown text to ANSI-formatted terminal output.
  * Supports: headings, bold, italic, code blocks with syntax highlighting,
- * inline code, blockquotes, lists, links, diff coloring, tables.
+ * inline code, blockquotes, lists, links, diff coloring, tables,
+ * and LaTeX math ($...$, $$...$$, \(...\), \[...\]) via Unicode approximation.
  *
  * No external dependencies — chalk handles all ANSI styling.
  * Syntax highlighting is done via simple heuristic tokenization
@@ -19,6 +21,10 @@ const INLINE_RE = /(\*\*.*?\*\*|\*.*?\*|`[^`]+`|\[.*?\]\(.*?\)|~~.*?~~)/g;
 // ─── Block-level renderer ───
 
 export function renderMarkdown(text: string): string {
+  // LaTeX math → Unicode approximation (runs before line-level parsing so
+  // display math becomes its own lines and inline math stays inline)
+  text = renderLatexMath(text);
+
   const lines = text.split("\n");
   const result: string[] = [];
   let inCodeBlock = false;

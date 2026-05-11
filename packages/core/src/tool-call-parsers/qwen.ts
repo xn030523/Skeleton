@@ -1,5 +1,5 @@
-import { HermesParser } from "./hermes.js";
-import { registerParser } from "./index.js";
+import { HermesParser } from "./nous.js";
+import { registerParser } from "./base.js";
 
 export class QwenParser extends HermesParser {}
 

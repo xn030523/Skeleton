@@ -18,7 +18,7 @@ export class InkAdapter implements OutputAdapter {
   constructor(
     private addLineFn: (line: string) => void,
     private addLinesFn: (lines: string[]) => void,
-    private setOutputFn: (lines: string[]) => void,
+    private clearOutputFn: () => void,
     private setInputFn: (text: string) => void,
     private onQuitFn: () => Promise<void>,
     private agent: Agent,
@@ -27,7 +27,7 @@ export class InkAdapter implements OutputAdapter {
 
   addLine(line: string): void { this.addLineFn(line); }
   addLines(lines: string[]): void { this.addLinesFn(lines); }
-  clearScreen(): void { this.setOutputFn([]); }
+  clearScreen(): void { this.clearOutputFn(); }
   setInput(text: string): void { this.setInputFn(text); }
   async quit(): Promise<void> { await this.onQuitFn(); }
 

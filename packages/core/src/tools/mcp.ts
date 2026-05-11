@@ -114,10 +114,18 @@ export async function connectMcpServer(name: string, config: McpServerConfig): P
 
   let transport;
   if (config.url) {
-    const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamable-http.js");
-    transport = new StreamableHTTPClientTransport(new URL(config.url), {
-      requestInit: { headers: config.headers },
-    });
+    // Choose transport: SSE for explicit transport:"sse", otherwise Streamable HTTP
+    if (config.transport === "sse") {
+      const { SSEClientTransport } = await import("@modelcontextprotocol/sdk/client/sse.js");
+      transport = new SSEClientTransport(new URL(config.url), {
+        requestInit: { headers: config.headers },
+      });
+    } else {
+      const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamable-http.js");
+      transport = new StreamableHTTPClientTransport(new URL(config.url), {
+        requestInit: { headers: config.headers },
+      });
+    }
   } else if (config.command) {
     // Pre-flight: verify command exists before spawning subprocess (Hermes-style)
     if (!isCommandAvailable(config.command)) {

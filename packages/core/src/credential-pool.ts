@@ -122,17 +122,11 @@ export class CredentialPool {
         chosen.requestCount++;
         break;
       case "round_robin": {
-        // Rotate: move current to end, pick first available
-        if (this.currentId) {
-          const curIdx = this.entries.findIndex(e => e.id === this.currentId);
-          if (curIdx >= 0 && curIdx < this.entries.length - 1) {
-            const [moved] = this.entries.splice(curIdx, 1);
-            this.entries.push(moved);
-            // Re-index priorities
-            for (let i = 0; i < this.entries.length; i++) this.entries[i].priority = i;
-          }
-        }
-        chosen = available[0];
+        const curIdx = this.currentId
+          ? available.findIndex(e => e.id === this.currentId)
+          : -1;
+        const nextIdx = (curIdx + 1) % available.length;
+        chosen = available[nextIdx];
         chosen.requestCount++;
         break;
       }

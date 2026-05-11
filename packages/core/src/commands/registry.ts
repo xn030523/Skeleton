@@ -74,8 +74,9 @@ export const COMMAND_REGISTRY: CommandDef[] = [
   },
   {
     name: "compress",
-    description: "Manually compress conversation context",
+    description: "Manually compress conversation context (optional focus topic to preserve)",
     category: "Session",
+    argsHint: "[focus topic]",
   },
   {
     name: "branch",
@@ -384,6 +385,12 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     name: "debug",
     description: "Generate a diagnostic report for troubleshooting",
     category: "Info",
+  },
+  {
+    name: "logs",
+    description: "Tail ~/.skeleton/logs/ (agent.log + errors.log)",
+    category: "Info",
+    argsHint: "[agent|errors] [N|--grep term]",
   },
   {
     name: "clear",

@@ -1,47 +1,17 @@
-export interface ToolCallResult {
-  name: string;
-  arguments: string;
-  id: string;
-}
+// Re-export base types + registry from the standalone base module.
+// The base is kept separate so parser subclasses don't form a circular
+// import against this barrel file (see ./base.ts for the rationale).
+export {
+  ToolCallParser,
+  registerParser,
+  getParser,
+  listParsers,
+  hasParser,
+} from "./base.js";
+export type { ParseResult, ToolCallResult } from "./base.js";
 
-export interface ParseResult {
-  content: string | null;
-  toolCalls: ToolCallResult[] | null;
-}
-
-export abstract class ToolCallParser {
-  abstract parse(text: string): ParseResult;
-}
-
-let PARSER_REGISTRY: Map<string, new () => ToolCallParser> | undefined;
-
-function ensureRegistry(): Map<string, new () => ToolCallParser> {
-  if (!PARSER_REGISTRY) PARSER_REGISTRY = new Map();
-  return PARSER_REGISTRY;
-}
-
-export function registerParser(name: string, cls: new () => ToolCallParser): void {
-  ensureRegistry().set(name, cls);
-}
-
-export function getParser(name: string): ToolCallParser {
-  const cls = ensureRegistry().get(name);
-  if (!cls) {
-    throw new Error(`Tool call parser '${name}' not found. Available: ${listParsers().join(", ")}`);
-  }
-  return new cls();
-}
-
-export function listParsers(): string[] {
-  return [...ensureRegistry().keys()].sort();
-}
-
-export function hasParser(name: string): boolean {
-  return ensureRegistry().has(name);
-}
-
-// Import parsers to trigger registration (side-effect imports)
-import "./hermes.js";
+// Side-effect imports: each subclass registers itself via registerParser().
+import "./nous.js";
 import "./mistral.js";
 import "./qwen.js";
 import "./deepseek-v3.js";
@@ -49,9 +19,11 @@ import "./deepseek-v31.js";
 import "./llama.js";
 import "./glm.js";
 import "./kimi-k2.js";
+import "./longcat.js";
+import "./qwen3-coder.js";
 
-// Re-export parser classes for external use
-export { HermesParser } from "./hermes.js";
+// Re-export parser classes for external use.
+export { HermesParser } from "./nous.js";
 export { MistralParser } from "./mistral.js";
 export { QwenParser } from "./qwen.js";
 export { DeepSeekV3Parser } from "./deepseek-v3.js";
@@ -59,3 +31,5 @@ export { DeepSeekV31Parser } from "./deepseek-v31.js";
 export { LlamaParser } from "./llama.js";
 export { GlmParser, Glm47Parser } from "./glm.js";
 export { KimiK2Parser } from "./kimi-k2.js";
+export { LongCatParser } from "./longcat.js";
+export { Qwen3CoderParser } from "./qwen3-coder.js";

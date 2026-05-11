@@ -39,7 +39,7 @@ export class SlidingWindowEngine implements ContextEngine {
   }
 
   async compress(messages: Message[], maxTokens: number): Promise<Message[]> {
-    // Keep first message (system context) + last N messages
+    // Keep first user message + last N messages (system prompt is sent separately)
     const keepCount = Math.min(this.maxMessages, messages.length);
     if (messages.length <= keepCount) return messages;
 

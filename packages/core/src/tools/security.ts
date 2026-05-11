@@ -144,8 +144,26 @@ export function isUrlSafe(url: string): { safe: boolean; reason?: string } {
 
   try {
     const parsed = new URL(url);
-    if (PRIVATE_IP.test(parsed.hostname)) {
-      // Allow in CTF lab context but flag it
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Always block cloud metadata endpoints (SSRF critical)
+    const CLOUD_METADATA = ["169.254.169.254", "169.254.170.2", "100.100.100.200", "metadata.google.internal", "metadata.goog"];
+    if (CLOUD_METADATA.includes(hostname)) {
+      return { safe: false, reason: `Blocked cloud metadata endpoint: ${hostname}` };
+    }
+
+    // Block internal hostnames
+    if (hostname.endsWith(".internal") || hostname.endsWith(".local") || hostname.endsWith(".localhost")) {
+      return { safe: false, reason: `Blocked internal hostname: ${hostname}` };
+    }
+
+    // Block link-local range entirely (169.254.x.x)
+    if (/^169\.254\./.test(hostname)) {
+      return { safe: false, reason: `Blocked link-local address: ${hostname}` };
+    }
+
+    // Private IPs: allow in CTF context but warn
+    if (PRIVATE_IP.test(hostname)) {
       return { safe: true };
     }
   } catch {

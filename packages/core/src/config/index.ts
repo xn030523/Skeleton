@@ -8,7 +8,6 @@ import type { SkillConfig } from "../skills/index.js";
 import { buildMcpServersConfig } from "../mcp/index.js";
 import { MemoryStore } from "../memory/store.js";
 import { UserProfile } from "../memory/user-profile.js";
-import { memoryTools } from "../memory/tools.js";
 import { CronStore } from "../cron/store.js";
 import { findProvider, resolveProviderConfig } from "../providers/registry.js";
 import "../providers/profiles.js";
@@ -19,10 +18,19 @@ export interface McpServerConfig {
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  /** Transport type for url-based servers: "streamable-http" (default) or "sse" */
+  transport?: "streamable-http" | "sse";
 }
 
 export function loadConfig(configPath?: string): AgentConfig {
   const yamlConfig = loadYaml(configPath);
+
+  // Config structure validation — catch malformed YAML at startup
+  const validationErrors = validateConfigStructure(yamlConfig);
+  if (validationErrors.length > 0) {
+    console.warn(`⚠️  Config validation warnings:`);
+    for (const err of validationErrors) console.warn(`   - ${err}`);
+  }
 
   const llm = resolveLLM(yamlConfig.llm);
   const fallback = yamlConfig.fallback ? resolveLLM(yamlConfig.fallback) : undefined;
@@ -57,9 +65,6 @@ export async function loadTools(
   const mem = memory ?? new MemoryStore();
   const profile = userProfile ?? new UserProfile();
   const cron = cronStore ?? new CronStore();
-
-  // Memory tools — LLM can save/search memories and user preferences
-  tools.push(...memoryTools(mem, profile));
 
   // Built-in RE tools
   const toolConfig = config._rawToolConfig;
@@ -227,4 +232,53 @@ function substituteEnvVars(text: string): string {
     if (defaultVal !== undefined) return defaultVal;
     return ""; // Unset var with no default → empty string
   });
+}
+
+const VALID_TOP_KEYS = new Set(["llm", "fallback", "agent", "tools", "mcp", "skills", "compression", "behavior", "toolOutput", "fileRead", "auxiliary", "credentials"]);
+const VALID_LLM_KEYS = new Set(["protocol", "apiKey", "baseUrl", "model", "provider", "maxTokens", "temperature", "reasoningEffort", "apiKeys", "credentialStrategy"]);
+const VALID_PROTOCOLS = new Set(["openai", "anthropic"]);
+
+function validateConfigStructure(config: RawConfig): string[] {
+  const errors: string[] = [];
+
+  for (const key of Object.keys(config)) {
+    if (!VALID_TOP_KEYS.has(key)) {
+      errors.push(`Unknown top-level key "${key}" — did you mean one of: ${[...VALID_TOP_KEYS].join(", ")}?`);
+    }
+  }
+
+  if (config.llm) {
+    for (const key of Object.keys(config.llm)) {
+      if (!VALID_LLM_KEYS.has(key)) {
+        errors.push(`Unknown key "llm.${key}" — valid keys: ${[...VALID_LLM_KEYS].join(", ")}`);
+      }
+    }
+    if (config.llm.protocol && !VALID_PROTOCOLS.has(config.llm.protocol)) {
+      errors.push(`Invalid llm.protocol "${config.llm.protocol}" — must be "openai" or "anthropic"`);
+    }
+    if (config.llm.maxTokens && (typeof config.llm.maxTokens !== "number" || config.llm.maxTokens < 1)) {
+      errors.push(`llm.maxTokens must be a positive number, got: ${config.llm.maxTokens}`);
+    }
+    if (config.llm.temperature !== undefined && (typeof config.llm.temperature !== "number" || config.llm.temperature < 0 || config.llm.temperature > 2)) {
+      errors.push(`llm.temperature must be 0-2, got: ${config.llm.temperature}`);
+    }
+  }
+
+  if (config.agent) {
+    if (config.agent.maxTurns !== undefined && (typeof config.agent.maxTurns !== "number" || config.agent.maxTurns < 1)) {
+      errors.push(`agent.maxTurns must be a positive number, got: ${config.agent.maxTurns}`);
+    }
+  }
+
+  if (config.compression) {
+    const c = config.compression as Record<string, unknown>;
+    if (c.threshold !== undefined && (typeof c.threshold !== "number" || c.threshold < 0 || c.threshold > 1)) {
+      errors.push(`compression.threshold must be 0.0-1.0, got: ${c.threshold}`);
+    }
+    if (c.targetRatio !== undefined && (typeof c.targetRatio !== "number" || c.targetRatio < 0 || c.targetRatio > 1)) {
+      errors.push(`compression.targetRatio must be 0.0-1.0, got: ${c.targetRatio}`);
+    }
+  }
+
+  return errors;
 }

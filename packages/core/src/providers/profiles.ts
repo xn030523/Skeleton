@@ -35,10 +35,20 @@ registerProvider({
 
 registerProvider({
   name: "gemini",
-  aliases: ["google"],
-  apiMode: "chat_completions",
-  baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+  aliases: ["google", "google-ai-studio"],
+  apiMode: "gemini_native",
+  baseUrl: "https://generativelanguage.googleapis.com/v1beta",
   apiKeyEnvVars: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+  defaultModel: "gemini-2.5-flash",
+  quirks: { maxOutputTokens: 65536, skipApiKey: false },
+});
+
+registerProvider({
+  name: "gemini-vertex",
+  aliases: ["vertex", "vertex-ai", "gcp-vertex"],
+  apiMode: "gemini_cloudcode",
+  baseUrl: "https://aiplatform.googleapis.com/v1",
+  apiKeyEnvVars: ["GOOGLE_ACCESS_TOKEN", "SKELETON_GCP_ACCESS_TOKEN"],
   defaultModel: "gemini-2.5-flash",
   quirks: { maxOutputTokens: 65536 },
 });
@@ -184,6 +194,7 @@ registerProvider({
     urlSuffix: "/v1",
     customHeaders: { "HTTP-Referer": "https://skeleton.agent", "X-Title": "Skeleton" },
     maxOutputTokens: 16384,
+    extraBody: { cache: { type: "ephemeral" } },
   },
 });
 

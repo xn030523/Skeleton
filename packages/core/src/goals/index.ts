@@ -196,6 +196,11 @@ export class GoalManager {
         try {
           const raw = fs.readFileSync(path.join(GOALS_DIR, file), "utf-8");
           const state = JSON.parse(raw) as GoalState;
+          if (state.status === "done" || state.status === "cleared") {
+            // Clean up completed goal files from disk
+            try { fs.unlinkSync(path.join(GOALS_DIR, file)); } catch { /* ignore */ }
+            continue;
+          }
           this.goals.set(sessionId, state);
         } catch {
           // skip corrupted files

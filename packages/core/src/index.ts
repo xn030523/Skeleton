@@ -17,11 +17,16 @@ export { workingMemoryTools } from "./memory/index.js";
 export { HonchoUserModel, honchoTools } from "./memory/index.js";
 export type { Hypothesis, HonchoProfile } from "./memory/index.js";
 export { ProjectContext } from "./context/index.js";
-export { Logger } from "./logger/index.js";
+export { Logger, tailLog, filterLog, getLogDir } from "./logger/index.js";
 export type { LogLevel } from "./logger/index.js";
 export { loadConfig, loadTools } from "./config/index.js";
 export type { McpServerConfig } from "./config/index.js";
 export { loadEnv, getSkeletonEnvPath, writeSkeletonEnv } from "./env.js";
+export { detectProxy, applyGlobalProxy, shouldBypassProxy } from "./proxy.js";
+export type { ProxyConfig } from "./proxy.js";
+export { getRandomTip, getRandomTips, getTipCount } from "./startup-tips.js";
+export { createBackup, restoreBackup, formatBackupSize } from "./backup.js";
+export type { BackupOptions, BackupResult } from "./backup.js";
 export type { AgentConfig, LLMConfig, Protocol, ToolDef, AuxiliaryModelConfig } from "./types.js";
 export { SkillRegistry, registerCtfSkills, skillManageTool } from "./skills/index.js";
 export type { SkillDef, SkillConfig } from "./skills/index.js";
@@ -42,6 +47,7 @@ export { checkPackageForMalware } from "./mcp/security.js";
 export { PersonalityStore } from "./personality/index.js";
 export {
   renderMarkdown,
+  renderLatexMath,
   markdownToMDv2,
   escapeMDv2,
   filterThinkBlocks,
@@ -66,8 +72,26 @@ export type { MoaConfig } from "./moa.js";
 export { CheckpointManager } from "./checkpoint.js";
 export { executeInSandbox, sandboxTerminalTool, cleanupSandboxes, DockerSandbox, SSHSandbox } from "./sandbox.js";
 export type { SandboxBackend, SandboxConfig, DockerSandboxOptions, SandboxExecResult } from "./sandbox.js";
-export { AcpServer } from "./acp.js";
-export type { AcpSession } from "./acp.js";
+export {
+  SkeletonACPAgent,
+  SessionManager as AcpSessionManager,
+  detectProvider,
+  hasProvider,
+  makeToolProgressCb,
+  makeThinkingCb,
+  makeStepCb,
+  makeMessageCb,
+  makeApprovalCallback,
+  getToolKind as getAcpToolKind,
+  makeToolCallId,
+  buildToolStart as buildAcpToolStart,
+  buildToolComplete as buildAcpToolComplete,
+  buildToolTitle as buildAcpToolTitle,
+  extractLocations as extractAcpLocations,
+  CopilotACPClient,
+  runAcpServer,
+} from "./acp/index.js";
+export type { SessionState as AcpSessionState } from "./acp/index.js";
 export { ApiServer } from "./api-server.js";
 export type { ApiServerConfig } from "./api-server.js";
 export { ttsTool, transcriptionTool } from "./tts.js";
@@ -79,9 +103,16 @@ export { runBatch, toolCallParsers } from "./rl.js";
 export type { BatchConfig } from "./rl.js";
 export { findProvider, listProviders, registerProvider, resolveProviderConfig, apiModeToProtocol } from "./providers/registry.js";
 export type { ProviderProfile, ApiMode, AuthMode, ProviderQuirks } from "./providers/registry.js";
+export { listLMStudioModels, isLMStudioReachable, isReasoningModel, lmStudioDoctor } from "./providers/lm-studio.js";
+export type { LMStudioModel } from "./providers/lm-studio.js";
+export { fetchModelCatalog, getModelsForProvider, invalidateCatalog } from "./model-catalog.js";
+export type { ModelCatalog } from "./model-catalog.js";
 export { createTransportFromConfig } from "./transports/factory.js";
 export { CodexResponsesTransport } from "./transports/codex-responses.js";
 export { BedrockConverseTransport } from "./transports/bedrock-converse.js";
+export { GeminiNativeTransport } from "./transports/gemini-native.js";
+export { GeminiCloudCodeTransport } from "./transports/gemini-cloudcode.js";
+export { videoAnalyzeTool } from "./tools/video-tool.js";
 export type { AnthropicTransportOptions } from "./transports/anthropic.js";
 export type { ChatCompletionsTransportOptions } from "./transports/chat-completions.js";
 export { classifyError, jitteredBackoff } from "./errors/classifier.js";
@@ -132,6 +163,9 @@ export { fuzzyFindAndReplace } from "./tools/fuzzy-match.js";
 export type { FuzzyResult } from "./tools/fuzzy-match.js";
 export { parseV4APatch, applyV4AOperations } from "./tools/patch-parser.js";
 export type { PatchOperation, AddOperation, UpdateOperation, DeleteOperation, MoveOperation, ApplyResult } from "./tools/patch-parser.js";
+export { postWriteLintHook } from "./tools/post-write-lint.js";
+export { inlineDiffPreHook, inlineDiffPostHook } from "./tools/inline-diff.js";
+export { atomicWriteFileSync, atomicWriteJsonSync } from "./atomic-write.js";
 export { ContextCompressor } from "./context/compressor.js";
 export type { SummarizerFn } from "./context/compressor.js";
 export { generateTitle } from "./tools/title-gen.js";
@@ -141,6 +175,8 @@ export { estimateUsageCost } from "./tools/usage-pricing.js";
 export type { CostEstimate } from "./tools/usage-pricing.js";
 export { getModelMetadata, getContextWindow, listModelsByProvider } from "./tools/model-metadata.js";
 export type { ModelMetadata } from "./tools/model-metadata.js";
+export { getModelGuidance, detectModelFamily } from "./model-prompts.js";
+export type { ModelFamily } from "./model-prompts.js";
 export { EventSystem } from "./events/index.js";
 export type { GatewayEvent, EventPayload, EventHandler } from "./events/index.js";
 export { getSessionEnv, setSessionEnv, deleteSessionEnv, getSessionEnvAll, clearSessionEnv } from "./session/context-vars.js";
@@ -172,7 +208,7 @@ export {
 export type { GoalState, GoalStatus } from "./goals/index.js";
 export {
   COMMAND_REGISTRY,
-  resolveCommand,
+  resolveCommand as resolveSlashCommand,
   listAllCommandNames,
   commandsByCategory,
   commandHelpLine,
@@ -194,7 +230,7 @@ export type { UsageRecord, QuotaConfig } from "./account-usage.js";
 export { loadBudgetConfig, resolveToolBudget } from "./budget-config.js";
 export type { BudgetConfig, ToolBudget } from "./budget-config.js";
 export { PluginSystem } from "./plugin-system.js";
-export type { PluginManifest, PluginContext } from "./plugin-system.js";
+export type { PluginManifest, PluginContext, PluginCommandHandler, RegisteredPluginCommand, ToolResultTransformer } from "./plugin-system.js";
 export { ManagedToolGateway } from "./managed-gateway.js";
 export type { GatewayToolDef, ToolInvocationResult } from "./managed-gateway.js";
 export { StreamBridge } from "./gateway/stream-bridge.js";
@@ -221,7 +257,7 @@ export type { DebugReport } from "./debug-report.js";
 export { checkPackageSecurity, formatVulnerabilityReport } from "./osv-security.js";
 export type { VulnerabilityReport } from "./osv-security.js";
 export { BackgroundTaskManager } from "./bg-tasks.js";
-export type { BgTask } from "./bg-tasks.js";
+export type { BgTask, BgTaskNotifyCallback } from "./bg-tasks.js";
 export { getAgentStatus, formatAgentStatus } from "./agent-status.js";
 export type { AgentStatusReport } from "./agent-status.js";
 export type { ParseResult, ToolCallResult } from "./tool-call-parsers/index.js";
@@ -240,4 +276,6 @@ export {
   GlmParser,
   Glm47Parser,
   KimiK2Parser,
+  LongCatParser,
+  Qwen3CoderParser,
 } from "./tool-call-parsers/index.js";

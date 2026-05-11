@@ -15,6 +15,7 @@ export type HookEvent =
   | "post_tool_call"
   | "pre_llm_call"
   | "post_llm_call"
+  | "transform_llm_output"
   | "on_error"
   | "on_session_start"
   | "on_session_end";
@@ -32,6 +33,7 @@ export interface HookResult {
   reason?: string;
   modifiedArgs?: Record<string, unknown>;
   contextInjection?: string;
+  transformedContent?: string;
 }
 
 export type HookHandler = (ctx: HookContext) => Promise<HookResult | void>;
@@ -82,8 +84,10 @@ export class HookRegistry {
         if (result.contextInjection) {
           mergedResult.contextInjection = (mergedResult.contextInjection ?? "") + result.contextInjection + "\n";
         }
+        if (result.transformedContent !== undefined) {
+          mergedResult.transformedContent = result.transformedContent;
+        }
       } catch (err) {
-        // Hooks never block on error — log and continue
         console.warn(`Hook "${entry.name}" error on ${event}: ${(err as Error).message}`);
       }
     }

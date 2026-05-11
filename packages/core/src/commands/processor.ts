@@ -71,6 +71,22 @@ export async function processCommandAsync(
   const resolved = resolveCommand(base);
   const canonical = resolved ? resolved.name : base.replace(/^\//, "");
 
+  // 2b. Plugin command dispatch — check before builtin switch so plugins can extend
+  if (!resolved) {
+    const pluginCmdName = base.replace(/^\//, "");
+    const pluginCmd = ctx.agent.pluginSystem.resolveCommand(pluginCmdName);
+    if (pluginCmd) {
+      try {
+        const args = parts.slice(1).join(" ");
+        const output = await pluginCmd.handler(args, pluginCmd.context);
+        if (output) adapter.addLine(output);
+      } catch (err) {
+        adapter.addLine(chalk.red(`  Plugin command "/${pluginCmdName}" failed: ${(err as Error).message}`));
+      }
+      return true;
+    }
+  }
+
   // 3. Dispatch
   switch (canonical) {
     // ── Exit ──
@@ -111,15 +127,17 @@ export async function processCommandAsync(
     case "title":
       return cmdTitle(ctx, adapter, parts);
 
-    case "compress":
-      adapter.addLine(chalk.gray("  Compressing..."));
+    case "compress": {
+      const focus = parts.slice(1).join(" ").trim();
+      adapter.addLine(chalk.gray(focus ? `  Compressing (focus: "${focus}")...` : "  Compressing..."));
       try {
-        const msg = await ctx.agent.compress();
+        const msg = await ctx.agent.compress(focus || undefined);
         adapter.addLine(chalk.green(`  ✓ ${msg}`));
       } catch (err) {
         adapter.addLine(chalk.red(`  ✗ ${(err as Error).message}`));
       }
       return true;
+    }
 
     case "branch":
       return cmdBranch(ctx, adapter, parts);
@@ -304,6 +322,9 @@ export async function processCommandAsync(
     case "debug":
       return cmdDebug(ctx, adapter);
 
+    case "logs":
+      return cmdLogs(adapter, parts);
+
     case "update":
       return cmdUpdate(adapter);
 
@@ -391,11 +412,38 @@ function cmdBranch(ctx: CommandContext, adapter: OutputAdapter, parts: string[])
 function cmdResume(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
   const branchName = parts[1];
   if (!branchName) {
+    // List branches AND recent sessions so user can pick
     const branches = ctx.agent.listBranches();
-    adapter.addLines([
-      chalk.gray("  Usage: /resume <branch-name>"),
-      ...(branches.length > 0 ? [chalk.gray(`  Available: ${branches.join(", ")}`)] : []),
-    ]);
+    const sessions = ctx.sessionDb.recentSessions(10);
+
+    const lines: string[] = [];
+
+    if (branches.length > 0) {
+      lines.push(chalk.cyan("  Branches:"));
+      for (const b of branches) {
+        lines.push(`    ${chalk.green("●")} ${chalk.white(b)}  ${chalk.gray("→ /resume " + b)}`);
+      }
+      lines.push("");
+    }
+
+    if (sessions.length > 0) {
+      lines.push(chalk.cyan("  Recent sessions:"));
+      for (const s of sessions) {
+        const raw = s as any;
+        const title = raw.title || raw.id?.slice(0, 20) || "untitled";
+        const date = (raw.created_at || raw.createdAt || "").slice(0, 16);
+        const msgs = chalk.gray(`${raw.message_count ?? raw.messageCount ?? 0} msgs`);
+        lines.push(`    ${chalk.yellow("◆")} ${chalk.white(title)}  ${msgs}  ${chalk.gray(date)}`);
+      }
+      lines.push("");
+      lines.push(chalk.gray("  Usage: /resume <branch-name>"));
+      lines.push(chalk.gray("  Tip: branch names are listed above with ● markers"));
+    } else if (branches.length === 0) {
+      lines.push(chalk.gray("  No branches or sessions to resume."));
+      lines.push(chalk.gray("  Create a branch first: /branch <name>"));
+    }
+
+    adapter.addLines(lines);
   } else {
     const ok = ctx.agent.resumeBranch(branchName);
     if (ok) {
@@ -981,6 +1029,41 @@ function cmdDebug(ctx: CommandContext, adapter: OutputAdapter): boolean {
   return true;
 }
 
+function cmdLogs(adapter: OutputAdapter, parts: string[]): boolean {
+  const { tailLog, filterLog, getLogDir } = require("../logger/index.js") as typeof import("../logger/index.js");
+
+  const file: "agent" | "errors" = parts[1] === "errors" ? "errors" : "agent";
+  const rest = parts.slice(parts[1] === "agent" || parts[1] === "errors" ? 2 : 1);
+
+  let lines: string[];
+  const grepIdx = rest.indexOf("--grep");
+  if (grepIdx >= 0 && rest[grepIdx + 1]) {
+    const grep = rest[grepIdx + 1];
+    lines = filterLog(file, { grep }, 100);
+    adapter.addLine(chalk.gray(`  ${file}.log — filtering by "${grep}" (${lines.length} matches)`));
+  } else {
+    const n = parseInt(rest[0] ?? "50", 10);
+    lines = tailLog(file, isNaN(n) ? 50 : n);
+    adapter.addLine(chalk.gray(`  ${file}.log — last ${lines.length} lines (${getLogDir()})`));
+  }
+
+  if (lines.length === 0) {
+    adapter.addLine(chalk.gray("  (no entries)"));
+    return true;
+  }
+
+  for (const line of lines) {
+    try {
+      const p = JSON.parse(line);
+      const color = p.level === "error" ? chalk.red : p.level === "warn" ? chalk.yellow : p.level === "info" ? chalk.cyan : chalk.gray;
+      adapter.addLine(`  ${color(`[${p.level.toUpperCase()}]`)} ${chalk.gray(p.ts.slice(11, 19))} ${chalk.white(p.prefix)}: ${p.msg}`);
+    } catch {
+      adapter.addLine(`  ${chalk.gray(line)}`);
+    }
+  }
+  return true;
+}
+
 async function cmdUpdate(adapter: OutputAdapter): Promise<boolean> {
   adapter.addLine(chalk.gray("  Checking for updates..."));
   try {
@@ -1099,11 +1182,12 @@ function cmdSteer(ctx: CommandContext, adapter: OutputAdapter, parts: string[]):
   const text = parts.slice(1).join(" ");
   if (!text) {
     adapter.addLine(chalk.gray("  Usage: /steer <prompt>"));
+    adapter.addLine(chalk.gray("  Injects a guidance message after next tool call without interrupting current turn."));
     return true;
   }
-  const agent = ctx.agent as any;
-  agent["steerMessage"] = text;
-  adapter.addLine(chalk.green(`  ✓ Steer set: will inject after next tool call`));
+  ctx.agent.setSteerMessage(text);
+  adapter.addLine(chalk.green(`  ✓ Steer queued — will inject after next tool call`));
+  adapter.addLine(chalk.gray(`    "${text.slice(0, 80)}${text.length > 80 ? "..." : ""}"`));
   return true;
 }
 

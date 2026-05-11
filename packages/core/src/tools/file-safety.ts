@@ -12,17 +12,24 @@ import path from "node:path";
 const DENIED_PATHS = [
   "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
   "known_hosts", ".env", ".bashrc", ".bash_profile", ".profile",
-  ".zshrc", ".gitconfig", ".npmrc", ".pypirc",
+  ".zshrc", ".zprofile", ".zshenv", ".zlogout",
+  ".bash_logout", ".inputrc", ".login",
+  ".gitconfig", ".npmrc", ".pypirc",
   "sudoers", "shadow", "passwd", "hosts",
   ".netrc", ".curlrc", ".wgetrc", "credentials.json",
   "service-account-key.json", "gcloud-service-key.json",
   "secrets.yml", "secrets.yaml", "secrets.json",
+  ".pgpass", ".my.cnf", ".mongoshrc.js",
+  "token.json", "auth.json", "oauth.json",
 ];
 
 const DENIED_PREFIXES = [
   ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure",
   ".config/gh", ".config/gcloud", ".config/hub",
-  "/etc/sudoers.d", "/etc/ssh",
+  ".config/op",       // 1Password CLI
+  ".config/hermes",   // Hermes agent credentials
+  ".local/share/keyrings",  // GNOME keyring
+  "/etc/sudoers.d", "/etc/ssh", "/etc/pam.d",
   // Skeleton-specific
   ".skeleton/credentials",
 ];

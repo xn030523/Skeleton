@@ -5,6 +5,8 @@ import {
   HonchoUserModel, generateMcpHelpText, listBuiltinMcpServersByCategory, MCP_CATEGORIES,
   renderMarkdown, filterThinkBlocks,
   findProvider, listProviders,
+  runAcpServer,
+  applyGlobalProxy,
 } from "@skeleton/core";
 import chalk from "chalk";
 import { runSetup } from "./setup.js";
@@ -15,6 +17,8 @@ import {
 } from "./theme.js";
 
 loadEnv();
+// Apply system proxy (HTTPS_PROXY/HTTP_PROXY/ALL_PROXY/SKELETON_PROXY) — non-blocking
+applyGlobalProxy().catch(() => { /* non-critical */ });
 const log = new Logger("cli");
 
 async function main() {
@@ -78,6 +82,11 @@ Legacy (still works):
 
   if (args[0] === "doctor") {
     await runDoctor();
+    return;
+  }
+
+  if (args[0] === "acp") {
+    runAcpServer();
     return;
   }
 
@@ -170,6 +179,9 @@ Legacy (still works):
   console.log(renderHeader(config.llm.model, process.cwd()));
   console.log(renderDivider());
   console.log(chalk.gray(`  Tools: ${tools.length} | MCP clients: ${mcpClients.length}`));
+  // Random startup tip from 100-tip rotation
+  const { getRandomTip } = await import("@skeleton/core");
+  console.log(chalk.gray(`  ${getRandomTip()}`));
   console.log(renderDivider());
 
   // Check if raw mode (ink) is supported — requires a real TTY

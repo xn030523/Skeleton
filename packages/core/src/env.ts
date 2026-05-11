@@ -46,7 +46,8 @@ export function getSkeletonEnvPath(): string {
   return SKELETON_ENV;
 }
 
-/** Write a key=value line to ~/.skeleton/.env (creates file if needed) */
+/** Write a key=value line to ~/.skeleton/.env (creates file if needed).
+ *  Uses atomic write (write to temp + rename) to prevent TOCTOU race conditions. */
 export function writeSkeletonEnv(entries: Record<string, string>): void {
   if (!fs.existsSync(SKELETON_DIR)) {
     fs.mkdirSync(SKELETON_DIR, { recursive: true });
@@ -79,5 +80,9 @@ export function writeSkeletonEnv(entries: Record<string, string>): void {
     lines.push(`${key}=${val}`);
   }
 
-  fs.writeFileSync(SKELETON_ENV, lines.join("\n") + "\n", "utf-8");
+  // Atomic write: write to temp file then rename (prevents TOCTOU)
+  const content = lines.join("\n") + "\n";
+  const tmpPath = SKELETON_ENV + `.tmp.${process.pid}`;
+  fs.writeFileSync(tmpPath, content, { encoding: "utf-8", mode: 0o600 });
+  fs.renameSync(tmpPath, SKELETON_ENV);
 }

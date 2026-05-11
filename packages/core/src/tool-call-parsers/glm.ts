@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ParseResult } from "./index.js";
-import { registerParser } from "./index.js";
+import type { ParseResult } from "./base.js";
+import { registerParser } from "./base.js";
 
 const START = "<tool_call>";
 const END = "</tool_call>";

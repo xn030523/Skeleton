@@ -50,6 +50,7 @@ export class ChatCompletionsTransport implements Transport {
       temperature: this.config.temperature ?? 0.3,
       ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
+      ...(this.quirks.extraBody ?? {}),
     });
 
     const choice = resp.choices[0];
@@ -87,6 +88,7 @@ export class ChatCompletionsTransport implements Transport {
       stream_options: { include_usage: true },
       ...(this.config.reasoningEffort ? { reasoning_effort: this.config.reasoningEffort } : {}),
       ...(toolSchemas ? { tools: toolSchemas } : {}),
+      ...(this.quirks.extraBody ?? {}),
     });
 
     let content = "";
@@ -126,7 +128,10 @@ export class ChatCompletionsTransport implements Transport {
     const toolCalls: ToolCall[] = [...toolCallBuffers.values()].map((buf) => ({
       id: buf.id,
       name: buf.name,
-      arguments: JSON.parse(buf.args || "{}"),
+      arguments: (() => {
+        try { return JSON.parse(buf.args || "{}"); }
+        catch { return { _parse_error: true, raw: buf.args }; }
+      })(),
     }));
 
     return {
@@ -188,7 +193,10 @@ export class ChatCompletionsTransport implements Transport {
     return (raw ?? []).map((tc) => ({
       id: tc.id,
       name: tc.function.name,
-      arguments: JSON.parse(tc.function.arguments),
+      arguments: (() => {
+        try { return JSON.parse(tc.function.arguments); }
+        catch { return { _parse_error: true, raw: tc.function.arguments }; }
+      })(),
     }));
   }
 

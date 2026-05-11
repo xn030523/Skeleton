@@ -40,10 +40,9 @@ export class AnthropicTransport implements Transport {
 
     // Third-party endpoints: strip beta headers that cause rejections
     if (this.quirks.stripBetaHeaders?.length) {
-      const stripSet = new Set(this.quirks.stripBetaHeaders);
       clientOpts.defaultHeaders = {
         ...clientOpts.defaultHeaders,
-        ...(Object.fromEntries(stripSet.entries())),
+        ...Object.fromEntries(this.quirks.stripBetaHeaders.map(h => [h, undefined])),
       };
     }
 
@@ -184,7 +183,8 @@ export class AnthropicTransport implements Transport {
           (v: Record<string, unknown>) => v.type !== "null" && v.type !== undefined,
         );
         if (nonNull.length === 1) {
-          result.type = nonNull[0].type;
+          // Spread all properties from the non-null variant, not just type
+          Object.assign(result, this.stripNullableUnions(nonNull[0]));
           continue;
         }
         if (nonNull.length > 1) {
@@ -211,7 +211,11 @@ export class AnthropicTransport implements Transport {
     const result: Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }> = [];
 
     for (const m of messages) {
-      if (m.role === "system") continue;
+      if (m.role === "system") {
+        // Anthropic doesn't support system role in messages array — convert to user
+        result.push({ role: "user", content: `[System]: ${safeContent}` });
+        continue;
+      }
 
       // Sanitize content: Anthropic rejects empty strings
       const safeContent = m.content || "(empty message)";

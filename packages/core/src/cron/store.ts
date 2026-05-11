@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { atomicWriteJsonSync } from "../atomic-write.js";
 
 export type ScheduleFormat =
   | { type: "cron"; expression: string }       // standard 5-field cron
@@ -112,7 +113,7 @@ export class CronStore {
   }
 
   private saveDisk(): void {
-    fs.writeFileSync(this.filePath, JSON.stringify(this.store, null, 2), "utf-8");
+    atomicWriteJsonSync(this.filePath, this.store);
   }
 }
 

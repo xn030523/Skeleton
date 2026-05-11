@@ -47,6 +47,8 @@ export class ToolCallGuardrail {
   /** Record a tool call result */
   record(name: string, args: Record<string, unknown>, result: "success" | "error" | "blocked"): void {
     this.history.push({ name, args, result, timestamp: Date.now() });
+    // Sliding window: keep only recent history to bound memory growth
+    if (this.history.length > 100) this.history = this.history.slice(-50);
   }
 
   /** Check if a tool call should be allowed. Returns { allow, reason? } */

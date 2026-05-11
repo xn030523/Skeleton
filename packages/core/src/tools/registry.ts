@@ -21,6 +21,7 @@ export class ToolRegistry {
   async execute(name: string, args: Record<string, unknown>): Promise<unknown> {
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`Tool not found: ${name}`);
+    if (!this.isToolEnabled(tool)) throw new Error(`Tool "${name}" is disabled (toolset: ${tool.toolset})`);
     return tool.execute(args);
   }
 

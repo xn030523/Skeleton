@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { atomicWriteJsonSync } from "../atomic-write.js";
 
 /**
  * Honcho-style dialectical user modeling.
@@ -28,6 +29,7 @@ export interface HonchoProfile {
 export class HonchoUserModel {
   private filePath: string;
   private profile: HonchoProfile;
+  private peerCardDirty = true;
 
   constructor(profilePath?: string) {
     this.filePath = profilePath ?? path.join(os.homedir(), ".skeleton", "honcho.json");
@@ -47,6 +49,7 @@ export class HonchoUserModel {
       existing.confidence = Math.max(0, Math.min(1, existing.confidence + delta));
       existing.evidence.push(supporting ? `+${new Date().toISOString().slice(0, 10)}` : `-${new Date().toISOString().slice(0, 10)}`);
       existing.lastUpdated = new Date().toISOString();
+      this.peerCardDirty = true;
       this.saveDisk();
       return existing;
     }
@@ -72,6 +75,7 @@ export class HonchoUserModel {
     }
 
     this.profile.hypotheses.push(hypothesis);
+    this.peerCardDirty = true;
     this.saveDisk();
     return hypothesis;
   }
@@ -113,7 +117,10 @@ export class HonchoUserModel {
       h.contradictIds = h.contradictIds.filter((id) => !toRemove.has(id));
     }
 
-    if (removed > 0) this.saveDisk();
+    if (removed > 0) {
+      this.peerCardDirty = true;
+      this.saveDisk();
+    }
     return removed;
   }
 
@@ -142,8 +149,13 @@ export class HonchoUserModel {
   buildContext(maxTokens = 500): string {
     if (this.profile.hypotheses.length === 0) return "";
 
-    // Refresh peer card
-    const card = this.updatePeerCard();
+    // Only regenerate peer card when hypotheses have changed
+    if (this.peerCardDirty || !this.profile.peerCard) {
+      this.updatePeerCard();
+      this.peerCardDirty = false;
+    }
+
+    const card = this.profile.peerCard;
     if (!card) return "";
 
     return `## User Model (dialectical)\n${card}`;
@@ -184,6 +196,6 @@ export class HonchoUserModel {
   }
 
   private saveDisk(): void {
-    fs.writeFileSync(this.filePath, JSON.stringify(this.profile, null, 2), "utf-8");
+    atomicWriteJsonSync(this.filePath, this.profile, { mode: 0o600 });
   }
 }

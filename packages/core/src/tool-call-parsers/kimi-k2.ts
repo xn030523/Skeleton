@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ParseResult } from "./index.js";
-import { registerParser } from "./index.js";
+import type { ParseResult } from "./base.js";
+import { registerParser } from "./base.js";
 import { MistralParser } from "./mistral.js";
 
 export class KimiK2Parser {

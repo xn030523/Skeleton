@@ -94,7 +94,7 @@ export class ProjectContext {
 
     for (const filename of CONTEXT_FILENAMES) {
       const filePath = path.join(resolved, filename);
-      if (fs.existsSync(filePath)) {
+      if (isReadableFile(filePath)) {
         this.discoverSubdirectoryContext(resolved, filePath);
       }
     }
@@ -157,7 +157,7 @@ export class ProjectContext {
     let dir = this.cwd;
     for (let i = 0; i < 20; i++) {
       for (const candidate of candidates) {
-        if (fs.existsSync(candidate)) return candidate;
+        if (isReadableFile(candidate)) return candidate;
       }
       const gitDir = path.join(dir, ".git");
       if (fs.existsSync(gitDir)) break;
@@ -167,7 +167,7 @@ export class ProjectContext {
     }
 
     for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) return candidate;
+      if (isReadableFile(candidate)) return candidate;
     }
     return null;
   }
@@ -199,5 +199,18 @@ export class ProjectContext {
     }
 
     return result;
+  }
+}
+
+// Some candidates like `.claude` / `.agents` may exist as directories on disk;
+// `existsSync` returns true for those but `readFileSync` then throws EISDIR.
+// This helper guarantees the path is a readable regular file before we try
+// to open it.
+function isReadableFile(p: string): boolean {
+  try {
+    const stat = fs.statSync(p);
+    return stat.isFile();
+  } catch {
+    return false;
   }
 }

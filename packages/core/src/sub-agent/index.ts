@@ -74,16 +74,16 @@ Current depth: ${currentDepth + 1}/${MAX_DEPTH}.`;
 
   try {
     const agent = new Agent(childConfig);
+    const usedToolNames: string[] = [];
+    agent.onToolCall = (name: string) => { usedToolNames.push(name); };
     const output = await agent.run(options.task);
     await agent.close();
-
-    const usedTools = agent.getToolRegistry().list().map((t) => t.name);
 
     return {
       taskId,
       output,
       success: true,
-      toolCallsUsed: usedTools,
+      toolCallsUsed: [...new Set(usedToolNames)],
     };
   } catch (err) {
     return {

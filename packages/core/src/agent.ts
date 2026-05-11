@@ -38,6 +38,7 @@ import { CheckpointManager } from "./checkpoint.js";
 import { ttsTool, transcriptionTool } from "./tts.js";
 import { KanbanBoard, kanbanTool } from "./kanban.js";
 import { getModelMetadata, getContextWindow } from "./tools/model-metadata.js";
+import { getModelGuidance } from "./model-prompts.js";
 import { ContextCompressor } from "./context/compressor.js";
 import { GoalManager } from "./goals/index.js";
 import { HookRegistry } from "./hooks.js";
@@ -46,6 +47,8 @@ import { SnapshotManager } from "./snapshot.js";
 import { PluginSystem } from "./plugin-system.js";
 import { InsightsEngine } from "./tools/insights.js";
 import { BackgroundTaskManager } from "./bg-tasks.js";
+import { postWriteLintHook } from "./tools/post-write-lint.js";
+import { inlineDiffPreHook, inlineDiffPostHook } from "./tools/inline-diff.js";
 
 export class Agent {
   private transport: Transport;
@@ -84,6 +87,8 @@ export class Agent {
   statusBarMode: "compact" | "normal" | "detailed";
   /** Voice mode configuration */
   voiceMode: "off" | "tts" | "stt" | "on";
+  private sessionStarted = false;
+  private ownsMemory: boolean;
   private messages: Message[] = [];
   private branches = new Map<string, { id: string; messages: Message[] }>();
   private toolRegistry: ToolRegistry;
@@ -108,6 +113,10 @@ export class Agent {
   private personality: PersonalityStore;
   private lastUsage: { promptTokens: number; completionTokens: number } = { promptTokens: 0, completionTokens: 0 };
   private totalUsage: { promptTokens: number; completionTokens: number; turns: number } = { promptTokens: 0, completionTokens: 0, turns: 0 };
+  private compressionCount = 0;
+  private steerMessage: string | null = null;
+  private lastActivityAt = Date.now();
+  private lastPressureWarned: "ok" | "moderate" | "high" | "critical" = "ok";
   private model: string;
   private contextWindow: number;
 
@@ -179,6 +188,7 @@ export class Agent {
     this.model = config.llm.model;
     this.contextWindow = getContextWindow(config.llm.model);
     this.memory = memory ?? null;
+    this.ownsMemory = !memory;
     this.userProfile = userProfile ?? null;
     this.sessionDb = sessionDb ?? null;
     this.sessionId = `sess_${Date.now().toString(36)}`;
@@ -300,6 +310,12 @@ export class Agent {
         console.error(`Failed to refresh MCP tools for "${serverName}": ${(err as Error).message}`);
       });
     });
+
+    // Post-write lint hook: auto-lint files after write_file/patch/edit
+    this.hooks.register("post_tool_call", async (ctx) => postWriteLintHook(ctx), "builtin:post-write-lint");
+    // Inline diff hooks: snapshot before write, render diff after
+    this.hooks.register("pre_tool_call", async (ctx) => inlineDiffPreHook(ctx), "builtin:inline-diff-pre");
+    this.hooks.register("post_tool_call", async (ctx) => inlineDiffPostHook(ctx), "builtin:inline-diff-post");
   }
 
   private buildSystemPrompt(userQuery?: string): string {
@@ -309,6 +325,12 @@ export class Agent {
     const soulContent = this.personality.getActive();
     if (soulContent) {
       prompt = soulContent + "\n\n" + prompt;
+    }
+
+    // Model-specific guidance (GPT / Codex / Gemini / Gemma / Qwen / DeepSeek / GLM / Kimi / Llama / Mistral)
+    const modelGuidance = getModelGuidance(this.model);
+    if (modelGuidance) {
+      prompt += "\n\n" + modelGuidance;
     }
 
     if (this.skillRegistry.list().length > 0) {
@@ -377,24 +399,50 @@ export class Agent {
   }
 
   async run(userInput: string): Promise<string> {
-    // Apply timeout if configured (Phase 2)
+    // Inactivity-based timeout: only kill if no tool/LLM activity for timeoutMs
     if (this.timeoutMs > 0) {
-      return await Promise.race([
-        this._run(userInput),
-        new Promise<string>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`Agent timeout after ${this.timeoutMs}ms`)),
-            this.timeoutMs,
-          ),
-        ),
-      ]);
+      this.lastActivityAt = Date.now();
+      return await this.withInactivityTimeout(() => this._run(userInput));
     }
     return await this._run(userInput);
   }
 
+  /** Record activity — resets inactivity timer */
+  private recordActivity(): void {
+    this.lastActivityAt = Date.now();
+  }
+
+  /** Run fn with inactivity-based timeout (polls every 10s) */
+  private async withInactivityTimeout<T>(fn: () => Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    let rejected = false;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      const check = () => {
+        if (rejected) return;
+        const idle = Date.now() - this.lastActivityAt;
+        if (idle >= this.timeoutMs) {
+          rejected = true;
+          reject(new Error(`Agent inactivity timeout: no activity for ${Math.round(idle / 1000)}s (limit: ${Math.round(this.timeoutMs / 1000)}s)`));
+          return;
+        }
+        timer = setTimeout(check, Math.min(10_000, this.timeoutMs - idle + 100));
+      };
+      timer = setTimeout(check, Math.min(10_000, this.timeoutMs));
+    });
+
+    try {
+      return await Promise.race([fn(), timeoutPromise]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async _run(userInput: string): Promise<string> {
-    // ── Hook: on_session_start ──
-    await this.hooks.emit("on_session_start");
+    // ── Hook: on_session_start (fire once, not on goal loop re-entry) ──
+    if (!this.sessionStarted) {
+      this.sessionStarted = true;
+      await this.hooks.emit("on_session_start");
+    }
 
     // Resolve context references (@file:, @url:, @git:, @diff:)
     let resolvedInput = userInput;
@@ -602,6 +650,27 @@ export class Agent {
       this.updateUsage(response.usage.promptTokens, response.usage.completionTokens);
     }
 
+    // ── Thinking-budget exhaustion detection ──
+    // Some reasoning models (Claude thinking, o-series, Gemini thinking) can burn
+    // their entire output budget on internal reasoning and return an empty visible
+    // response. Detect that here so we don't silently loop on blank assistant turns.
+    const hasToolCalls = !!(response.toolCalls && response.toolCalls.length > 0);
+    const visibleContent = (response.content ?? "").trim();
+    const finishReason = (response.finishReason ?? "").toLowerCase();
+    const budgetExhaustedReasons = new Set([
+      "length", "max_tokens", "max_output_tokens", "truncated", "incomplete",
+    ]);
+    if (!hasToolCalls && !visibleContent && budgetExhaustedReasons.has(finishReason)) {
+      const diagnostic =
+        `[⚠ thinking budget exhausted — model returned empty content (finish_reason=${response.finishReason}). ` +
+        `Try lowering reasoning effort, raising max_tokens, or switching model.]`;
+      const finalMsg: Message = { role: "assistant", content: diagnostic };
+      this.messages.push(finalMsg);
+      if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, finalMsg);
+      (response as { content: string }).content = diagnostic;
+      return false;
+    }
+
     if (response.toolCalls && response.toolCalls.length > 0) {
       const assistantMsg: Message = {
         role: "assistant",
@@ -636,13 +705,31 @@ export class Agent {
         if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, toolMsg, tc.name);
       }
 
+      // Inject queued steer message (if any) as a user note the agent sees on next turn
+      if (this.steerMessage) {
+        const steerMsg: Message = {
+          role: "user",
+          content: `[STEER — mid-run guidance from user]\n${this.steerMessage}`,
+        };
+        this.messages.push(steerMsg);
+        if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, steerMsg);
+        this.steerMessage = null;
+      }
+
       return true; // continue loop
     }
 
-    if (this.memory && response.content) {
-      this.autoSaveMemory(response.content);
+    // ── Hook: transform_llm_output (allows plugins to reshape content before storage) ──
+    let finalContent = response.content ?? "";
+    const transformResult = await this.hooks.emit("transform_llm_output", { result: finalContent });
+    if (transformResult.transformedContent !== undefined) {
+      finalContent = transformResult.transformedContent;
     }
-    const finalMsg: Message = { role: "assistant", content: response.content ?? "" };
+
+    if (this.memory && finalContent) {
+      this.autoSaveMemory(finalContent);
+    }
+    const finalMsg: Message = { role: "assistant", content: finalContent };
     this.messages.push(finalMsg);
     if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, finalMsg);
     return false; // done
@@ -713,6 +800,7 @@ export class Agent {
   private async executeToolCall(tc: ToolCall): Promise<{ tc: ToolCall; resultStr: string; duration: number; isError: boolean }> {
     const startTime = Date.now();
     this.toolCallCount++;
+    this.recordActivity();
     this.onToolCall?.(tc.name, tc.arguments);
 
     // Notify project context of directory visits (progressive subdirectory discovery)
@@ -778,6 +866,15 @@ export class Agent {
     resultStr = redactSensitiveText(resultStr, { force: true });
     // Apply tool output limits (Phase 4)
     resultStr = this.applyToolOutputLimits(tc.name, resultStr);
+
+    // Apply plugin tool-result transformers (can rewrite output)
+    resultStr = await this.pluginSystem.applyToolResultTransformers(tc.name, tc.arguments, resultStr);
+
+    // Apply plugin terminal-output transformers for terminal tool specifically
+    if (tc.name === "terminal" || tc.name === "bash" || tc.name === "execute_code") {
+      resultStr = await this.pluginSystem.applyTerminalTransformers(resultStr);
+    }
+
     const finalResultStr = warnings.length > 0
       ? `${resultStr}\n[GUARDRAIL WARNING: ${warnings.join("; ")}]`
       : resultStr;
@@ -902,6 +999,7 @@ export class Agent {
   }
 
   private async callWithFallback(systemPrompt: string): Promise<NormalizedResponse> {
+    this.recordActivity();
     // ── Hook: pre_llm_call (allows context injection before LLM call) ──
     const preResult = await this.hooks.emit("pre_llm_call");
     let prompt = systemPrompt;
@@ -925,6 +1023,12 @@ export class Agent {
     systemPrompt: string,
     onToken: (token: string) => void,
   ): Promise<NormalizedResponse> {
+    this.recordActivity();
+    // Wrap onToken to record activity on each chunk (so long streams don't time out)
+    const tokenWithActivity = (token: string) => {
+      this.recordActivity();
+      onToken(token);
+    };
     // ── Hook: pre_llm_call (streaming path) ──
     const preResult = await this.hooks.emit("pre_llm_call");
     let prompt = systemPrompt;
@@ -933,8 +1037,8 @@ export class Agent {
     }
 
     const response = await this.retryWithFallback(
-      () => this.transport.sendStream(prompt, this.messages, onToken, this.tools),
-      () => this.fallbackTransport?.sendStream(prompt, this.messages, onToken, this.tools),
+      () => this.transport.sendStream(prompt, this.messages, tokenWithActivity, this.tools),
+      () => this.fallbackTransport?.sendStream(prompt, this.messages, tokenWithActivity, this.tools),
       this.apiMaxRetries,
     );
 
@@ -1111,7 +1215,7 @@ export class Agent {
   getAuxiliaryClient(): AuxiliaryClient { return this.auxiliaryClient; }
 
   getHistory(): Message[] { return [...this.messages]; }
-  reset(): void { this.messages = []; }
+  reset(): void { this.messages = []; this.guardrail.reset(); }
 
   /** Load messages from an external source (e.g., snapshot restore) */
   loadMessages(msgs: Array<{ role: string; content: string }>): void {
@@ -1153,14 +1257,16 @@ export class Agent {
   }
 
   /** Compress context: summarize conversation into a condensed form */
-  async compress(): Promise<string> {
+  async compress(focus?: string): Promise<string> {
     if (this.messages.length === 0) return "Nothing to compress.";
 
     const originalCount = this.messages.length;
 
-    // Use ContextCompressor with auxiliary client as summarizer
     const summarizer = async (text: string, instruction?: string) => {
-      return await this.auxiliaryClient.summarize(text, instruction);
+      const focusedInstruction = focus
+        ? `${instruction ?? "Produce a concise summary."}\n\nFocus especially on: ${focus}. Preserve all details related to this topic verbatim, compress unrelated content aggressively.`
+        : instruction;
+      return await this.auxiliaryClient.summarize(text, focusedInstruction);
     };
 
     this.messages = await this.compressor.compress(
@@ -1169,7 +1275,8 @@ export class Agent {
       summarizer,
     );
 
-    // Save compressed session to DB
+    this.compressionCount++;
+
     if (this.sessionDb) {
       const compressedId = `compressed_${Date.now().toString(36)}`;
       this.sessionDb.createSession(compressedId, `Compressed from ${this.sessionId}`, this.sessionId);
@@ -1178,7 +1285,8 @@ export class Agent {
       }
     }
 
-    return `Compressed ${originalCount} messages into ${this.messages.length} messages.`;
+    const focusNote = focus ? ` [focus: ${focus}]` : "";
+    return `Compressed ${originalCount} messages into ${this.messages.length} messages${focusNote} (total compressions: ${this.compressionCount}).`;
   }
 
   /** Undo last turn: remove last user + assistant pair */
@@ -1203,11 +1311,35 @@ export class Agent {
   }
 
   /** Update usage tracking from transport response */
-  updateUsage(promptTokens: number, completionTokens: number): void {
+  private updateUsage(promptTokens: number, completionTokens: number): void {
     this.lastUsage = { promptTokens, completionTokens };
     this.totalUsage.promptTokens += promptTokens;
     this.totalUsage.completionTokens += completionTokens;
     this.totalUsage.turns++;
+    this.checkContextPressure();
+  }
+
+  /** Emit tiered context-pressure warnings when crossing thresholds */
+  private checkContextPressure(): void {
+    const progress = this.getContextProgress();
+    if (progress.pressure === this.lastPressureWarned) return;
+
+    // Only emit on escalation (ok → moderate → high → critical), not on de-escalation
+    const order = { ok: 0, moderate: 1, high: 2, critical: 3 };
+    if (order[progress.pressure] <= order[this.lastPressureWarned]) {
+      this.lastPressureWarned = progress.pressure;
+      return;
+    }
+
+    this.lastPressureWarned = progress.pressure;
+
+    const icon = progress.pressure === "critical" ? "🔴" : progress.pressure === "high" ? "🟠" : "🟡";
+    const msg = `${icon} Context pressure: ${progress.pressure.toUpperCase()} (${progress.percent}% — ${progress.usedTokens.toLocaleString()} / ${progress.contextWindow.toLocaleString()} tokens)`;
+    console.warn(msg);
+
+    if (progress.pressure === "critical") {
+      console.warn("  Consider /compress to free up space before the next turn.");
+    }
   }
 
   /** Get current session usage stats */
@@ -1221,16 +1353,18 @@ export class Agent {
     contextWindow: number;
     percent: number;
     model: string;
+    compressionCount: number;
+    pressure: "ok" | "moderate" | "high" | "critical";
   } {
-    // Hermes: context usage = last prompt_tokens from API response,
-    // NOT cumulative. prompt_tokens = current context window consumption
-    // because each API call sends the full conversation as the prompt.
-    // Completion tokens are generated by the model and don't consume context space.
     const usedTokens = this.lastUsage.promptTokens;
     const percent = this.contextWindow > 0
       ? Math.min(100, Math.round((usedTokens / this.contextWindow) * 100))
       : 0;
-    return { usedTokens, contextWindow: this.contextWindow, percent, model: this.model };
+    let pressure: "ok" | "moderate" | "high" | "critical" = "ok";
+    if (percent >= 95) pressure = "critical";
+    else if (percent >= 80) pressure = "high";
+    else if (percent >= 60) pressure = "moderate";
+    return { usedTokens, contextWindow: this.contextWindow, percent, model: this.model, compressionCount: this.compressionCount, pressure };
   }
 
   /** Cycle tool progress display mode: off → new → all → verbose → off */
@@ -1249,6 +1383,13 @@ export class Agent {
   /** Get/set active personality */
   getPersonality(): PersonalityStore { return this.personality; }
 
+  /** Queue a steer message — injected after next tool call without interrupting current turn */
+  setSteerMessage(text: string): void { this.steerMessage = text; }
+  /** Clear queued steer message */
+  clearSteerMessage(): void { this.steerMessage = null; }
+  /** Check if a steer message is pending */
+  hasPendingSteer(): boolean { return this.steerMessage !== null; }
+
   /** Get InsightsEngine for usage analytics */
   getInsightsEngine(): InsightsEngine | null {
     if (!this.sessionDb) return null;
@@ -1256,7 +1397,7 @@ export class Agent {
   }
 
   async close(options?: { closeMcp?: boolean }): Promise<void> {
-    if (this.memory) this.memory.close();
+    if (this.memory && this.ownsMemory) this.memory.close();
     const shouldCloseMcp = options?.closeMcp !== false;
     // Close MCP clients only when the agent owns them (not shared/borrowed)
     if (shouldCloseMcp) {

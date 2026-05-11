@@ -6,9 +6,11 @@ import {
   listBuiltinMcpServersByCategory, MCP_CATEGORIES,
   markdownToMDv2, escapeMDv2, filterThinkBlocks,
   chunkForTelegram, convertTablesToMDv2,
+  applyGlobalProxy,
 } from "@skeleton/core";
 
 loadEnv();
+applyGlobalProxy().catch(() => { /* non-critical */ });
 const log = new Logger("tg");
 
 const TOKEN = process.env.SKELETON_TG_TOKEN ?? "";
@@ -204,12 +206,80 @@ function getState(userId: number): UserState {
     };
     state.agent.setMcpClients(mcpClients);
     sessionDb.createSession(state.sessionId, `Telegram ${userId}`);
+
+    // Wire approval callback: send inline keyboard buttons to Telegram
+    const capturedUserId = userId;
+    state.agent.getApprovalSystem().onApprovalRequest(async (toolName, args, reason) => {
+      return await requestTelegramApproval(capturedUserId, toolName, args, reason);
+    });
+
     users.set(userId, state);
   } else {
     state.lastActive = Date.now();
   }
   return state;
 }
+
+// ─── Telegram Approval via Inline Keyboard ───
+
+const pendingApprovals = new Map<string, { resolve: (approved: boolean) => void; timer: NodeJS.Timeout }>();
+
+async function requestTelegramApproval(
+  userId: number,
+  toolName: string,
+  args: Record<string, unknown>,
+  reason: string,
+): Promise<boolean> {
+  const approvalId = `appr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const preview = `${toolName}: ${JSON.stringify(args).slice(0, 200)}`;
+
+  try {
+    await bot.api.sendMessage(userId, `⚠️ *Approval Required*\n\nTool: \`${escapeMDv2(toolName)}\`\nReason: ${escapeMDv2(reason)}\n\n\`\`\`\n${escapeMDv2(preview)}\n\`\`\``, {
+      parse_mode: "MarkdownV2",
+      reply_markup: {
+        inline_keyboard: [[
+          { text: "✅ Approve", callback_data: `approve:${approvalId}` },
+          { text: "❌ Deny", callback_data: `deny:${approvalId}` },
+        ]],
+      },
+    });
+  } catch {
+    return true; // fallback: auto-approve if message fails
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingApprovals.delete(approvalId);
+      resolve(true); // timeout = auto-approve (fail-open for usability)
+    }, 60_000);
+    pendingApprovals.set(approvalId, { resolve, timer });
+  });
+}
+
+bot.on("callback_query:data", async (ctx) => {
+  const data = ctx.callbackQuery.data;
+  if (!data) return;
+
+  const [action, approvalId] = data.split(":");
+  if (!approvalId || (action !== "approve" && action !== "deny")) return;
+
+  const pending = pendingApprovals.get(approvalId);
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: "Expired or already handled" });
+    return;
+  }
+
+  clearTimeout(pending.timer);
+  pendingApprovals.delete(approvalId);
+  pending.resolve(action === "approve");
+
+  const emoji = action === "approve" ? "✅" : "❌";
+  await ctx.answerCallbackQuery({ text: `${emoji} ${action === "approve" ? "Approved" : "Denied"}` });
+
+  try {
+    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } });
+  } catch { /* message might be too old */ }
+});
 
 // ─── MarkdownV2 helpers ───
 
@@ -711,6 +781,41 @@ bot.start({
     await bot.api.setMyCommands(BOT_COMMANDS);
     console.log("   Command menu synced");
     log.info("Bot connected", { username: info.username });
+
+    // Auto-resume: restore recent active sessions from DB
+    const recentSessions = sessionDb.recentSessions(20);
+    let resumed = 0;
+    for (const sess of recentSessions) {
+      if (!sess.id.startsWith("tg_")) continue;
+      const match = sess.id.match(/^tg_(\d+)_/);
+      if (!match) continue;
+      const userId = parseInt(match[1], 10);
+      if (users.has(userId)) continue;
+
+      const messages = sessionDb.getMessages(sess.id);
+      if (messages.length === 0) continue;
+
+      const agentConfig = { ...config, tools: loadedTools };
+      const agent = new Agent(agentConfig, memory, userProfile, cronStore, sessionDb, projectContext, honcho);
+      agent.setMcpClients(mcpClients);
+      agent.loadMessages(messages.map(m => ({ role: m.role, content: m.content })));
+
+      agent.getApprovalSystem().onApprovalRequest(async (toolName, args, reason) => {
+        return await requestTelegramApproval(userId, toolName, args, reason);
+      });
+
+      users.set(userId, {
+        agent,
+        sessionId: sess.id,
+        lock: Promise.resolve(),
+        lastActive: Date.now(),
+      });
+      resumed++;
+    }
+    if (resumed > 0) {
+      console.log(`   Resumed ${resumed} session(s) from DB`);
+      log.info("Sessions resumed", { count: resumed });
+    }
   },
 });
 

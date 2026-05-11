@@ -1,6 +1,7 @@
 import type { CronJob } from "./store.js";
 import { CronStore } from "./store.js";
 import { shouldFire } from "./parser.js";
+import { scanContextContent } from "../tools/prompt-security.js";
 
 export type JobExecutor = (job: CronJob) => Promise<string>;
 
@@ -20,7 +21,6 @@ export class CronScheduler {
     if (this.running) return;
     this.running = true;
     this.timer = setInterval(() => this.tick(), 60_000);
-    // Run first tick immediately
     this.tick();
   }
 
@@ -39,16 +39,24 @@ export class CronScheduler {
 
   private async tick(): Promise<void> {
     const now = new Date();
-    const jobs = this.store.list(true); // enabled only
+    const jobs = this.store.list(true);
 
     for (const job of jobs) {
       if (!shouldFire(job, now)) continue;
+
+      // Scan assembled prompt for injection patterns before execution
+      const scanResult = scanContextContent(job.prompt, `cron:${job.name}`);
+      if (!scanResult.safe) {
+        const warnings = scanResult.warnings.join("; ");
+        console.warn(`[Cron] Job "${job.name}" prompt injection detected: ${warnings}`);
+        this.store.markRun(job.id, `BLOCKED: prompt injection detected — ${warnings}`);
+        continue;
+      }
 
       try {
         const result = await this.executor(job);
         this.store.markRun(job.id, result.slice(0, 500));
       } catch (err) {
-        // Mark as run even on failure (at-most-once)
         this.store.markRun(job.id, `ERROR: ${(err as Error).message}`);
       }
     }
