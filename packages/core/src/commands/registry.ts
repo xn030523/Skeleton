@@ -228,8 +228,10 @@ export const COMMAND_REGISTRY: CommandDef[] = [
   },
   {
     name: "curator",
-    description: "Run skill maintenance (dedup, categorize, detect stale)",
+    description: "Skill maintenance (status, pause, resume, run)",
     category: "Tools",
+    argsHint: "[status|pause|resume|run]",
+    subcommands: ["status", "pause", "resume", "run"],
   },
   {
     name: "plugin",

@@ -297,19 +297,66 @@ export class SkillRegistry {
     return false;
   }
 
-  /** Tier 1: compact catalog — agentskills.io spec, with two-layer cache */
-  buildCatalog(): string {
-    // Check disk cache
-    const cachePath = path.join(this.userSkillDir, ".catalog_cache.json");
-    if (this.catalogCache && fs.existsSync(cachePath)) {
+  /** Build manifest of on-disk SKILL.md files (path → [mtime, size]) for cache validation */
+  private buildCatalogManifest(): Record<string, [number, number]> {
+    const manifest: Record<string, [number, number]> = {};
+    const dirs = [this.userSkillDir, this.projectSkillDir, ...this.externalDirs];
+    for (const dir of dirs) {
+      if (!fs.existsSync(dir)) continue;
       try {
-        const cached = JSON.parse(fs.readFileSync(cachePath, "utf-8")) as CatalogCache;
-        if (cached.mtime === this.catalogCache.mtime && cached.size === this.catalogCache.size) {
-          return cached.content;
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.name.startsWith(".")) continue;
+          const skillPath = path.join(dir, entry.name);
+          const skillMd = entry.isDirectory()
+            ? path.join(skillPath, "SKILL.md")
+            : (entry.name.endsWith(".md") ? skillPath : null);
+          if (!skillMd || !fs.existsSync(skillMd)) continue;
+          try {
+            const st = fs.statSync(skillMd);
+            manifest[skillMd] = [st.mtimeMs, st.size];
+          } catch { /* ignore */ }
         }
-      } catch { /* rebuild */ }
+      } catch { /* ignore dir errors */ }
+    }
+    // Fingerprint built-in (non-agentCreated) skills by name+description hash so
+    // they invalidate the snapshot on code change without touching disk.
+    for (const skill of this.skills.values()) {
+      if (!skill.agentCreated) {
+        const key = `builtin:${skill.name}`;
+        manifest[key] = [0, (skill.description ?? "").length];
+      }
+    }
+    return manifest;
+  }
+
+  /** Tier 1: compact catalog — agentskills.io spec, with two-layer cache (memory + disk snapshot) */
+  buildCatalog(): string {
+    const cachePath = path.join(this.userSkillDir, ".catalog_cache.json");
+    const currentManifest = this.buildCatalogManifest();
+    const manifestKey = JSON.stringify(currentManifest);
+
+    // Layer 1: in-memory cache
+    if (this.catalogCache && this.catalogCache.mtime === hashString(manifestKey)) {
+      return this.catalogCache.content;
     }
 
+    // Layer 2: on-disk snapshot (survives process restarts)
+    if (fs.existsSync(cachePath)) {
+      try {
+        const raw = fs.readFileSync(cachePath, "utf-8");
+        const snapshot = JSON.parse(raw) as { manifest: string; content: string };
+        if (snapshot.manifest === manifestKey) {
+          this.catalogCache = {
+            content: snapshot.content,
+            mtime: hashString(manifestKey),
+            size: this.skills.size,
+          };
+          return snapshot.content;
+        }
+      } catch { /* fall through to rebuild */ }
+    }
+
+    // Cold path: rebuild catalog from in-memory registry
     const categories = new Map<string, SkillDef[]>();
     for (const skill of this.skills.values()) {
       const list = categories.get(skill.category) ?? [];
@@ -317,7 +364,7 @@ export class SkillRegistry {
       categories.set(skill.category, list);
     }
 
-    const lines: string[] = ["<available_skills>"];
+    const lines: string[] = [];
     for (const [cat, skills] of categories) {
       lines.push(`${cat}:`);
       for (const s of skills) {
@@ -326,19 +373,17 @@ export class SkillRegistry {
         lines.push(`  - ${s.name}: ${s.description}${invocable}${created}`);
       }
     }
-    lines.push("</available_skills>");
     const content = lines.join("\n");
 
-    // Write cache
+    // Write both cache layers
+    this.catalogCache = {
+      content,
+      mtime: hashString(manifestKey),
+      size: this.skills.size,
+    };
     try {
       fs.mkdirSync(this.userSkillDir, { recursive: true });
-      const cache: CatalogCache = {
-        content,
-        mtime: Date.now(),
-        size: this.skills.size,
-      };
-      fs.writeFileSync(cachePath, JSON.stringify(cache), "utf-8");
-      this.catalogCache = cache;
+      fs.writeFileSync(cachePath, JSON.stringify({ manifest: manifestKey, content }), "utf-8");
     } catch { /* non-critical */ }
 
     return content;
@@ -381,7 +426,14 @@ export class SkillRegistry {
 }
 
 export interface SkillConfig {
-  ctf?: boolean | "auto";
+  /**
+   * CTF skill loading mode:
+   * - true (default): register CTF skills; catalog mode (names + descriptions only)
+   * - false: do not register CTF skills
+   * - "auto": alias for true (kept for backward compat)
+   * - "all": eagerly inject full skill content into system prompt (legacy, token-heavy)
+   */
+  ctf?: boolean | "auto" | "all";
 }
 
 /** Parse a SKILL.md file with YAML frontmatter */
@@ -442,4 +494,13 @@ function discoverSupportFiles(skillDir: string): string[] {
     }
   }
   return files;
+}
+
+/** Fast non-crypto hash (djb2) for manifest fingerprinting */
+function hashString(s: string): number {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return h;
 }

@@ -4,3 +4,5 @@ export { registerCtfSkills } from "./ctf/index.js";
 export { skillManageTool, skillViewTool, skillResourceTool } from "./tools.js";
 export { SkillCurator } from "./curator.js";
 export type { CuratorReport } from "./curator.js";
+export { CuratorScheduler } from "./curator-scheduler.js";
+export type { CuratorState, CuratorSchedulerOptions } from "./curator-scheduler.js";

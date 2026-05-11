@@ -15,6 +15,8 @@ import { honchoTools } from "./memory/honcho-tools.js";
 import { SkillRegistry, type SkillConfig } from "./skills/index.js";
 import { registerCtfSkills } from "./skills/ctf/index.js";
 import { skillManageTool, skillViewTool, skillResourceTool } from "./skills/tools.js";
+import { SkillCurator } from "./skills/curator.js";
+import { CuratorScheduler } from "./skills/curator-scheduler.js";
 import type { CronStore } from "./cron/store.js";
 import { cronManageTool } from "./cron/tools.js";
 import { delegateTaskTool } from "./sub-agent/tools.js";
@@ -101,6 +103,7 @@ export class Agent {
   private frozenUserSnapshot: string;
   private skillRegistry: SkillRegistry;
   private skillMode: "all" | "catalog";
+  private curatorScheduler: CuratorScheduler;
   private mcpClients: unknown[] = [];
   private mcpServerTools = new Map<string, { toolNames: string[]; client: unknown; config?: McpServerConfig }>();
   private sessionDb: SessionDB | null;
@@ -244,6 +247,12 @@ export class Agent {
     }
     // Load user-created skills from disk
     this.skillRegistry.loadFromDisk();
+
+    // Curator + idle-based auto-scheduler (Hermes maybe_run_curator pattern).
+    // Fires in background after user has been idle >= minIdleMinutes AND
+    // intervalHours has elapsed since last run. State persisted to disk.
+    const curator = new SkillCurator(this.skillRegistry);
+    this.curatorScheduler = new CuratorScheduler(curator);
     // Register skill_manage tool so LLM can create/edit/delete skills
     const skillMgmt = skillManageTool(this.skillRegistry);
     (skillMgmt as { toolset?: string; emoji?: string }).toolset = "skills";
@@ -426,6 +435,7 @@ export class Agent {
   }
 
   async run(userInput: string): Promise<string> {
+    this.curatorScheduler.onUserActivity();
     // Inactivity-based timeout: only kill if no tool/LLM activity for timeoutMs
     if (this.timeoutMs > 0) {
       this.lastActivityAt = Date.now();
@@ -557,6 +567,11 @@ export class Agent {
     // ── Hook: on_session_end ──
     await this.hooks.emit("on_session_end");
 
+    // Idle-based curator tick (fire-and-forget; gated internally by interval + idle).
+    // The scheduler sampled lastActivityAt at run() entry; by the time this fires
+    // the user is about to read the result — starting the idle clock.
+    void this.curatorScheduler.tick().catch(() => { /* non-critical */ });
+
     return result;
   }
 
@@ -636,6 +651,7 @@ export class Agent {
   }
 
   async runStream(userInput: string, onToken: (token: string) => void): Promise<string> {
+    this.curatorScheduler.onUserActivity();
     // Pre-turn compression check (same as _run)
     if (this.compressor.shouldCompress(this.messages, this.contextWindow)) {
       console.log(`Auto-compressing ${this.messages.length} messages before stream turn`);
@@ -668,6 +684,9 @@ export class Agent {
     if (this.toolCallCount >= 5) {
       this.suggestSkillCreation(userInput, result);
     }
+
+    // Idle-based curator tick (fire-and-forget; gated internally).
+    void this.curatorScheduler.tick().catch(() => { /* non-critical */ });
 
     return result;
   }
@@ -1235,6 +1254,7 @@ export class Agent {
   getToolRegistry(): ToolRegistry { return this.toolRegistry; }
   getMcpServerTools(): Map<string, { toolNames: string[]; client: unknown; config?: McpServerConfig }> { return this.mcpServerTools; }
   getSkillRegistry(): SkillRegistry { return this.skillRegistry; }
+  getCuratorScheduler(): CuratorScheduler { return this.curatorScheduler; }
   getMemory(): MemoryStore | null { return this.memory; }
   getUserProfile(): UserProfile | null { return this.userProfile; }
   getApprovalSystem(): ApprovalSystem { return this.approval; }

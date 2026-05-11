@@ -272,7 +272,7 @@ export async function processCommandAsync(
       return cmdMcp(ctx, adapter, parts);
 
     case "curator":
-      return cmdCurator(ctx, adapter);
+      return cmdCurator(ctx, adapter, parts);
 
     case "plugin":
       return cmdPlugin(ctx, adapter, parts);
@@ -947,14 +947,45 @@ function cmdTools(ctx: CommandContext, adapter: OutputAdapter): boolean {
   return true;
 }
 
-function cmdCurator(ctx: CommandContext, adapter: OutputAdapter): boolean {
-  const { SkillCurator } = require("../skills/index.js") as typeof import("../skills/index.js");
-  const curator = new SkillCurator(ctx.agent.getSkillRegistry());
-  const report = curator.run();
-  const lines = curator.formatReport(report).split("\n");
-  adapter.addLines(lines.map(l => chalk.white(`  ${l}`)));
-  if (report.autoFixed > 0) adapter.addLine(chalk.green(`  ✓ Auto-fixed ${report.autoFixed} skill(s)`));
-  if (report.duplicates.length > 0) adapter.addLine(chalk.yellow(`  ⚠ ${report.duplicates.length} duplicate(s) detected`));
+function cmdCurator(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const scheduler = ctx.agent.getCuratorScheduler();
+  const sub = (parts[1] ?? "run").toLowerCase();
+
+  if (sub === "status") {
+    const state = scheduler.loadState();
+    adapter.addLines([
+      chalk.cyan("  Curator status:"),
+      `    Paused: ${state.paused ? chalk.yellow("yes") : chalk.green("no")}`,
+      `    Last run: ${chalk.white(state.lastRunAt ?? "never")}`,
+      `    Total runs: ${chalk.white(String(state.runCount))}`,
+      state.lastRunSummary ? `    Summary: ${chalk.gray(state.lastRunSummary)}` : "",
+    ].filter(Boolean));
+    return true;
+  }
+
+  if (sub === "pause") {
+    scheduler.setPaused(true);
+    adapter.addLine(chalk.yellow("  ⏸ Curator paused. Resume with /curator resume"));
+    return true;
+  }
+
+  if (sub === "resume") {
+    scheduler.setPaused(false);
+    adapter.addLine(chalk.green("  ▶ Curator resumed"));
+    return true;
+  }
+
+  // run (default) — force run regardless of gates
+  void scheduler.forceRun().then(report => {
+    const { SkillCurator } = require("../skills/index.js") as typeof import("../skills/index.js");
+    const curator = new SkillCurator(ctx.agent.getSkillRegistry());
+    const lines = curator.formatReport(report).split("\n");
+    adapter.addLines(lines.map(l => chalk.white(`  ${l}`)));
+    if (report.autoFixed > 0) adapter.addLine(chalk.green(`  ✓ Auto-fixed ${report.autoFixed} skill(s)`));
+    if (report.duplicates.length > 0) adapter.addLine(chalk.yellow(`  ⚠ ${report.duplicates.length} duplicate(s) detected`));
+  }).catch(err => {
+    adapter.addLine(chalk.red(`  ✗ Curator failed: ${(err as Error).message}`));
+  });
   return true;
 }
 
