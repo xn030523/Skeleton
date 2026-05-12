@@ -141,25 +141,111 @@ export class AuxiliaryClient {
     }
   }
 
-  /** Analyze an image URL or base64 data URI */
+  /**
+   * Analyze image via direct HTTP (bypasses Transport layer because
+   * Message.content is string-only but vision requires multimodal blocks).
+   *
+   * Protocol-aware: OpenAI-compat sends `image_url` content block, Anthropic
+   * sends `image` block with base64 source. Returns the analysis text.
+   */
   async analyzeImage(imageData: string, question: string): Promise<string> {
-    const messages: Message[] = [
-      {
-        role: "user",
-        content: `[Image attached: ${imageData.startsWith("data:") ? "base64" : "URL"}]\n\n${question}`,
-      },
-    ];
+    const cfg = this.resolveAuxConfig(this.auxConfig?.vision);
     try {
-      const resp = await this.getTransport("vision").send(
-        "You are a vision analysis assistant. Describe and analyze the provided image.",
-        messages,
-        NO_TOOLS,
-      );
-      return resp.content ?? "Unable to analyze image.";
+      if (cfg.protocol === "anthropic") {
+        return await this.callAnthropicVision(cfg, imageData, question);
+      }
+      return await this.callOpenAIVision(cfg, imageData, question);
     } catch (err) {
       console.warn(`Auxiliary vision failed: ${(err as Error).message}`);
       return `Vision analysis error: ${(err as Error).message}`;
     }
+  }
+
+  /** Parse "data:image/xxx;base64,..." → { mediaType, data } */
+  private parseDataUri(uri: string): { mediaType: string; data: string } | null {
+    const m = /^data:([^;]+);base64,(.+)$/.exec(uri);
+    if (!m) return null;
+    return { mediaType: m[1], data: m[2] };
+  }
+
+  private async callOpenAIVision(cfg: LLMConfig, imageData: string, question: string): Promise<string> {
+    // OpenAI-compatible multimodal: content is an array with image_url + text blocks.
+    const parsed = this.parseDataUri(imageData);
+    const imageUrl = parsed ? imageData : imageData;
+
+    const base = (cfg.baseUrl || "").replace(/\/+$/, "");
+    const endpoint = base.endsWith("/v1") ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
+
+    const body = {
+      model: cfg.model,
+      max_tokens: cfg.maxTokens ?? 1024,
+      temperature: cfg.temperature ?? 0.3,
+      messages: [
+        { role: "system", content: "You are a vision analysis assistant. Describe and analyze the provided image." },
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: imageUrl } },
+            { type: "text", text: question },
+          ],
+        },
+      ],
+    };
+
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text().catch(() => "")}`);
+    const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+    return data.choices?.[0]?.message?.content ?? "Unable to analyze image.";
+  }
+
+  private async callAnthropicVision(cfg: LLMConfig, imageData: string, question: string): Promise<string> {
+    // Anthropic multimodal: content[] contains { type:"image", source:{type:"base64",...} }
+    const parsed = this.parseDataUri(imageData);
+    if (!parsed) {
+      // Anthropic Messages API does not accept raw URLs — must be base64.
+      throw new Error("Anthropic vision requires base64 data URI");
+    }
+
+    const base = (cfg.baseUrl || "").replace(/\/+$/, "");
+    const endpoint = base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
+
+    const body = {
+      model: cfg.model,
+      max_tokens: cfg.maxTokens ?? 1024,
+      temperature: cfg.temperature ?? 0.3,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: parsed.mediaType, data: parsed.data } },
+            { type: "text", text: question },
+          ],
+        },
+      ],
+    };
+
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": cfg.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text().catch(() => "")}`);
+    const data = await resp.json() as { content?: Array<{ type: string; text?: string }> };
+    const textBlock = data.content?.find(c => c.type === "text");
+    return textBlock?.text ?? "Unable to analyze image.";
   }
 
   /** Classify an error for retry logic */

@@ -131,8 +131,16 @@ export async function processCommandAsync(
       const focus = parts.slice(1).join(" ").trim();
       adapter.addLine(chalk.gray(focus ? `  Compressing (focus: "${focus}")...` : "  Compressing..."));
       try {
-        const msg = await ctx.agent.compress(focus || undefined);
-        adapter.addLine(chalk.green(`  ✓ ${msg}`));
+        const { summarizeManualCompression, estimateMessageTokens } = require("../context/manual-feedback.js") as typeof import("../context/manual-feedback.js");
+        const beforeMessages = ctx.agent.getHistory();
+        const beforeTokens = estimateMessageTokens(beforeMessages);
+        await ctx.agent.compress(focus || undefined);
+        const afterMessages = ctx.agent.getHistory();
+        const afterTokens = estimateMessageTokens(afterMessages);
+        const fb = summarizeManualCompression(beforeMessages, afterMessages, beforeTokens, afterTokens);
+        adapter.addLine(chalk.green(`  ✓ ${fb.headline}`));
+        adapter.addLine(chalk.gray(`    ${fb.tokenLine}`));
+        if (fb.note) adapter.addLine(chalk.yellow(`    ${fb.note}`));
       } catch (err) {
         adapter.addLine(chalk.red(`  ✗ ${(err as Error).message}`));
       }

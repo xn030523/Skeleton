@@ -1,167 +1,268 @@
 /**
  * Tool Output Limits — 3-layer defense against context-window overflow.
  *
- * Layer 1: Per-tool output cap (truncate oversized results)
- * Layer 2: Per-result persistence to disk when output exceeds threshold
- * Layer 3: Per-turn aggregate budget spilling largest results to disk
+ * Ports Hermes `tools/tool_result_storage.py` + `tools/budget_config.py`.
  *
- * Inspired by Hermes tool_result_storage.py + budget_config.py.
+ *   Layer 1 (per-tool cap)    — truncateOutput() called by the tool itself
+ *   Layer 2 (per-result)      — maybePersistResult(): single result > threshold
+ *                               → full content saved to disk, preview + ref
+ *                               returned; wrapped in <persisted-output> tag
+ *                               so subsequent layers and reviewers recognize it
+ *   Layer 3 (per-turn budget) — enforceTurnBudget(): aggregate across all tool
+ *                               results in one assistant turn; if over budget,
+ *                               spill the largest non-persisted results
+ *
+ * `read_file` has its threshold pinned to `Infinity` to prevent
+ * persist → read → persist loops (the read_file tool is the primary way to
+ * retrieve persisted content).
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-const DEFAULT_MAX_BYTES = 100_000;     // 100KB per tool result
-const DEFAULT_MAX_LINES = 2000;
-const DEFAULT_TURN_BUDGET = 500_000;   // 500KB per turn aggregate
-const PERSIST_THRESHOLD = 50_000;      // 50KB → persist to disk
-const PREVIEW_HEAD = 2000;
-const PREVIEW_TAIL = 1000;
+// ── Public constants (match Hermes exactly) ──────────────────────────
 
-const TMP_DIR = path.join(os.tmpdir(), "skeleton-tool-results");
+export const DEFAULT_RESULT_SIZE_CHARS = 100_000;
+export const DEFAULT_TURN_BUDGET_CHARS = 200_000;
+export const DEFAULT_PREVIEW_SIZE_CHARS = 1_500;
+
+export const PERSISTED_OUTPUT_TAG = "<persisted-output>";
+export const PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>";
+
+/** Tools whose thresholds must never be overridden (prevents loops). */
+const PINNED_THRESHOLDS: Record<string, number> = {
+  read_file: Number.POSITIVE_INFINITY,
+};
+
+/** Storage dir for persisted tool results. */
+const STORAGE_DIR = path.join(os.tmpdir(), "skeleton-results");
+
+// ── BudgetConfig ─────────────────────────────────────────────────────
 
 export interface BudgetConfig {
-  maxBytes: number;
-  maxLines: number;
-  maxLineLength: number;
-  turnBudgetBytes: number;
-  persistThreshold: number;
+  /** Default per-result threshold when no pinned / override applies. */
+  defaultResultSize: number;
+  /** Aggregate budget across all tool results in one turn. */
+  turnBudget: number;
+  /** Preview size shown inline after persistence. */
+  previewSize: number;
+  /** Per-tool threshold overrides. */
+  toolOverrides: Record<string, number>;
+  /**
+   * Legacy line-count cap (not in Hermes). Kept for backward compat with
+   * the terminal/search tools that rely on it for UX. Set to 0 to disable.
+   */
+  maxLines?: number;
+  /** Legacy per-line length cap. */
+  maxLineLength?: number;
 }
 
-const DEFAULT_BUDGET: BudgetConfig = {
-  maxBytes: DEFAULT_MAX_BYTES,
-  maxLines: DEFAULT_MAX_LINES,
+export const DEFAULT_BUDGET: BudgetConfig = {
+  defaultResultSize: DEFAULT_RESULT_SIZE_CHARS,
+  turnBudget: DEFAULT_TURN_BUDGET_CHARS,
+  previewSize: DEFAULT_PREVIEW_SIZE_CHARS,
+  toolOverrides: {},
+  maxLines: 2000,
   maxLineLength: 10_000,
-  turnBudgetBytes: DEFAULT_TURN_BUDGET,
-  persistThreshold: PERSIST_THRESHOLD,
 };
 
-// Per-tool overrides for known high-output tools
-const PINNED_THRESHOLDS: Record<string, Partial<BudgetConfig>> = {
-  terminal: { maxBytes: 200_000, maxLines: 5000 },
-  read_file: { maxBytes: 200_000 },
-  search_files: { maxBytes: 50_000 },
-  web_search: { maxBytes: 30_000 },
-  web_fetch: { maxBytes: 50_000 },
-  hexdump: { maxBytes: 50_000 },
-  strings: { maxBytes: 30_000 },
-};
+/** Resolve the persistence threshold for a tool.
+ *  Priority: pinned (infinite) > toolOverrides > default. */
+export function resolveThreshold(toolName: string, config: BudgetConfig = DEFAULT_BUDGET): number {
+  if (toolName in PINNED_THRESHOLDS) return PINNED_THRESHOLDS[toolName];
+  if (toolName in config.toolOverrides) return config.toolOverrides[toolName];
+  return config.defaultResultSize;
+}
 
-/** Resolve budget config for a specific tool */
+/** Legacy wrapper — older code asked for full BudgetConfig per tool. */
 export function resolveBudget(toolName?: string, overrides?: Partial<BudgetConfig>): BudgetConfig {
-  const pinned = toolName ? PINNED_THRESHOLDS[toolName] : undefined;
   return {
     ...DEFAULT_BUDGET,
-    ...pinned,
     ...overrides,
+    toolOverrides: {
+      ...DEFAULT_BUDGET.toolOverrides,
+      ...(overrides?.toolOverrides ?? {}),
+    },
   };
 }
 
-/** Layer 1: Truncate oversized tool output */
-export function truncateOutput(output: string, config: BudgetConfig): string {
-  // Truncate by byte count
-  if (output.length > config.maxBytes) {
-    const head = output.slice(0, Math.floor(config.maxBytes * 0.7));
-    const tail = output.slice(-Math.floor(config.maxBytes * 0.3));
-    const omitted = output.length - head.length - tail.length;
-    return `${head}\n\n[... ${omitted} chars omitted (max ${config.maxBytes}) ...]\n\n${tail}`;
-  }
+// ── Preview generation ───────────────────────────────────────────────
 
-  // Truncate by line count
-  const lines = output.split("\n");
-  if (lines.length > config.maxLines) {
-    const headLines = lines.slice(0, Math.floor(config.maxLines * 0.7));
-    const tailLines = lines.slice(-Math.floor(config.maxLines * 0.3));
-    const omittedLines = lines.length - headLines.length - tailLines.length;
-    return `${headLines.join("\n")}\n\n[... ${omittedLines} lines omitted (max ${config.maxLines}) ...]\n\n${tailLines.join("\n")}`;
-  }
-
-  // Truncate long lines
-  return lines.map(line =>
-    line.length > config.maxLineLength
-      ? line.slice(0, config.maxLineLength) + ` [... ${line.length - config.maxLineLength} more chars]`
-      : line,
-  ).join("\n");
+/** Truncate at last newline within maxChars. Returns [preview, hasMore]. */
+export function generatePreview(
+  content: string,
+  maxChars = DEFAULT_PREVIEW_SIZE_CHARS,
+): [string, boolean] {
+  if (content.length <= maxChars) return [content, false];
+  let truncated = content.slice(0, maxChars);
+  const lastNl = truncated.lastIndexOf("\n");
+  if (lastNl > maxChars / 2) truncated = truncated.slice(0, lastNl + 1);
+  return [truncated, true];
 }
 
-/** Layer 2: Persist large tool result to disk, return preview for context */
+// ── Layer 1: Per-tool truncation ─────────────────────────────────────
+
+/** Truncate oversized tool output by char/line count with head+tail preview. */
+export function truncateOutput(output: string, config: BudgetConfig = DEFAULT_BUDGET): string {
+  const maxChars = config.defaultResultSize;
+  if (output.length > maxChars) {
+    const head = output.slice(0, Math.floor(maxChars * 0.7));
+    const tail = output.slice(-Math.floor(maxChars * 0.3));
+    const omitted = output.length - head.length - tail.length;
+    return `${head}\n\n[... ${omitted} chars omitted (max ${maxChars}) ...]\n\n${tail}`;
+  }
+  const maxLines = config.maxLines ?? 0;
+  if (maxLines > 0) {
+    const lines = output.split("\n");
+    if (lines.length > maxLines) {
+      const headLines = lines.slice(0, Math.floor(maxLines * 0.7));
+      const tailLines = lines.slice(-Math.floor(maxLines * 0.3));
+      const omittedLines = lines.length - headLines.length - tailLines.length;
+      return `${headLines.join("\n")}\n\n[... ${omittedLines} lines omitted (max ${maxLines}) ...]\n\n${tailLines.join("\n")}`;
+    }
+  }
+  const maxLineLen = config.maxLineLength ?? 0;
+  if (maxLineLen > 0) {
+    return output.split("\n").map(line =>
+      line.length > maxLineLen
+        ? line.slice(0, maxLineLen) + ` [... ${line.length - maxLineLen} more chars]`
+        : line,
+    ).join("\n");
+  }
+  return output;
+}
+
+// ── Layer 2: Per-result persistence ──────────────────────────────────
+
+function buildPersistedMessage(
+  preview: string,
+  hasMore: boolean,
+  originalSize: number,
+  filePath: string,
+): string {
+  const sizeKb = originalSize / 1024;
+  const sizeStr = sizeKb >= 1024 ? `${(sizeKb / 1024).toFixed(1)} MB` : `${sizeKb.toFixed(1)} KB`;
+  return (
+    `${PERSISTED_OUTPUT_TAG}\n` +
+    `This tool result was too large (${originalSize.toLocaleString()} characters, ${sizeStr}).\n` +
+    `Full output saved to: ${filePath}\n` +
+    `Use the read_file tool with offset and limit to access specific sections of this output.\n\n` +
+    `Preview (first ${preview.length} chars):\n` +
+    `${preview}${hasMore ? "\n..." : ""}\n` +
+    `${PERSISTED_OUTPUT_CLOSING_TAG}`
+  );
+}
+
+/**
+ * Persist oversized tool result to disk, return preview + path reference.
+ * No-op if content is within threshold or threshold is Infinity.
+ */
 export function maybePersistResult(
   toolName: string,
-  resultId: string,
-  output: string,
-  config: BudgetConfig,
+  toolUseId: string,
+  content: string,
+  config: BudgetConfig = DEFAULT_BUDGET,
+  thresholdOverride?: number,
 ): { context: string; persistedPath?: string } {
-  if (output.length < config.persistThreshold) {
-    return { context: output };
+  const threshold = thresholdOverride !== undefined
+    ? thresholdOverride
+    : resolveThreshold(toolName, config);
+
+  if (!isFinite(threshold)) return { context: content };
+  if (content.length <= threshold) return { context: content };
+
+  const [preview, hasMore] = generatePreview(content, config.previewSize);
+
+  try {
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    const filePath = path.join(STORAGE_DIR, `${toolUseId}.txt`);
+    fs.writeFileSync(filePath, content, "utf-8");
+    return {
+      context: buildPersistedMessage(preview, hasMore, content.length, filePath),
+      persistedPath: filePath,
+    };
+  } catch {
+    // Fallback: inline-truncated preview only
+    return {
+      context:
+        `${preview}\n\n` +
+        `[Truncated: tool response was ${content.length.toLocaleString()} chars. ` +
+        `Full output could not be saved to disk.]`,
+    };
   }
-
-  // Persist to disk
-  fs.mkdirSync(TMP_DIR, { recursive: true });
-  const filePath = path.join(TMP_DIR, `${toolName}_${resultId}.txt`);
-  fs.writeFileSync(filePath, output, "utf-8");
-
-  // Generate preview
-  const preview = generatePreview(output);
-  const context = `${preview}\n\n[Full result (${(output.length / 1024).toFixed(1)}KB) persisted to: ${filePath}]`;
-
-  return { context, persistedPath: filePath };
 }
 
-/** Layer 3: Enforce per-turn aggregate budget */
+// ── Layer 3: Per-turn aggregate budget ───────────────────────────────
+
+export interface TurnBudgetMessage {
+  toolName: string;
+  toolUseId: string;
+  content: string;
+}
+
+/**
+ * If aggregate size across all tool results in a turn exceeds budget, persist
+ * the largest non-persisted results until under budget. Messages already
+ * wrapped in <persisted-output> are skipped.
+ *
+ * Mutates the list (updates .content) and returns it.
+ */
 export function enforceTurnBudget(
-  results: Array<{ toolName: string; output: string; resultId: string }>,
-  config: BudgetConfig,
-): Array<{ toolName: string; output: string }> {
-  const totalBytes = results.reduce((sum, r) => sum + r.output.length, 0);
-
-  if (totalBytes <= config.turnBudgetBytes) {
-    return results.map(r => ({ toolName: r.toolName, output: truncateOutput(r.output, resolveBudget(r.toolName)) }));
-  }
-
-  // Sort by size descending — spill largest to disk first
-  const sorted = [...results].sort((a, b) => b.output.length - a.output.length);
-  let budgetUsed = 0;
-  const finalResults: Array<{ toolName: string; output: string }> = [];
-
-  for (const result of sorted) {
-    const remaining = config.turnBudgetBytes - budgetUsed;
-
-    if (result.output.length <= remaining) {
-      // Fits in budget
-      const processed = truncateOutput(result.output, resolveBudget(result.toolName));
-      finalResults.push({ toolName: result.toolName, output: processed });
-      budgetUsed += processed.length;
-    } else {
-      // Spill to disk
-      const { context } = maybePersistResult(result.toolName, result.resultId, result.output, resolveBudget(result.toolName));
-      finalResults.push({ toolName: result.toolName, output: context });
-      budgetUsed += context.length;
+  messages: TurnBudgetMessage[],
+  config: BudgetConfig = DEFAULT_BUDGET,
+): TurnBudgetMessage[] {
+  let totalSize = 0;
+  const candidates: Array<{ idx: number; size: number }> = [];
+  for (let i = 0; i < messages.length; i++) {
+    const size = messages[i].content.length;
+    totalSize += size;
+    if (!messages[i].content.includes(PERSISTED_OUTPUT_TAG)) {
+      candidates.push({ idx: i, size });
     }
   }
 
-  return finalResults;
-}
+  if (totalSize <= config.turnBudget) return messages;
 
-function generatePreview(output: string): string {
-  if (output.length <= PREVIEW_HEAD + PREVIEW_TAIL) return output;
-  const head = output.slice(0, PREVIEW_HEAD);
-  const tail = output.slice(-PREVIEW_TAIL);
-  const omitted = output.length - PREVIEW_HEAD - PREVIEW_TAIL;
-  return `${head}\n\n[... ${omitted} chars omitted, see persisted file ...]\n\n${tail}`;
-}
+  // Spill largest first.
+  candidates.sort((a, b) => b.size - a.size);
 
-/** Clean up persisted results older than maxAgeMs */
-export function cleanupPersistedResults(maxAgeMs: number = 3600_000): void {
-  if (!fs.existsSync(TMP_DIR)) return;
-  const now = Date.now();
-  for (const file of fs.readdirSync(TMP_DIR)) {
-    const filePath = path.join(TMP_DIR, file);
-    try {
-      const stat = fs.statSync(filePath);
-      if (now - stat.mtimeMs > maxAgeMs) {
-        fs.unlinkSync(filePath);
-      }
-    } catch { /* skip */ }
+  for (const { idx, size } of candidates) {
+    if (totalSize <= config.turnBudget) break;
+    const msg = messages[idx];
+    const { context } = maybePersistResult(
+      msg.toolName,
+      msg.toolUseId,
+      msg.content,
+      config,
+      0, // force persistence regardless of per-tool threshold
+    );
+    if (context !== msg.content) {
+      totalSize -= size;
+      totalSize += context.length;
+      messages[idx].content = context;
+    }
   }
+  return messages;
+}
+
+// ── Cleanup ──────────────────────────────────────────────────────────
+
+/** Remove persisted result files older than maxAgeMs (default 1h). */
+export function cleanupPersistedResults(maxAgeMs = 3600_000): void {
+  if (!fs.existsSync(STORAGE_DIR)) return;
+  const now = Date.now();
+  try {
+    for (const file of fs.readdirSync(STORAGE_DIR)) {
+      const fp = path.join(STORAGE_DIR, file);
+      try {
+        const stat = fs.statSync(fp);
+        if (now - stat.mtimeMs > maxAgeMs) fs.unlinkSync(fp);
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+}
+
+export function getStorageDir(): string {
+  return STORAGE_DIR;
 }

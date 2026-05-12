@@ -17,6 +17,14 @@ import { registerCtfSkills } from "./skills/ctf/index.js";
 import { skillManageTool, skillViewTool, skillResourceTool } from "./skills/tools.js";
 import { SkillCurator } from "./skills/curator.js";
 import { CuratorScheduler } from "./skills/curator-scheduler.js";
+import { BackgroundReview, type ReviewAgentSpawner } from "./skills/background-review.js";
+import {
+  maybePersistResult,
+  enforceTurnBudget,
+  type TurnBudgetMessage,
+  type BudgetConfig as OutputBudgetConfig,
+  DEFAULT_BUDGET as DEFAULT_OUTPUT_BUDGET,
+} from "./tools/output-limits.js";
 import type { CronStore } from "./cron/store.js";
 import { cronManageTool } from "./cron/tools.js";
 import { delegateTaskTool } from "./sub-agent/tools.js";
@@ -82,6 +90,7 @@ export class Agent {
   private toolOutputMaxLines: number;
   private toolOutputMaxLineLength: number;
   private fileReadMaxChars: number;
+  private outputBudget: OutputBudgetConfig;
   /** Tool progress display mode (Task 5) */
   progressMode: "off" | "new" | "all" | "verbose";
   private lastToolName: string;
@@ -104,6 +113,9 @@ export class Agent {
   private skillRegistry: SkillRegistry;
   private skillMode: "all" | "catalog";
   private curatorScheduler: CuratorScheduler;
+  private backgroundReview: BackgroundReview;
+  /** Fires after a background review with a one-line summary (e.g. '💾 Self-improvement review: skill_created=xxx') */
+  onBackgroundReview?: (message: string) => void;
   private mcpClients: unknown[] = [];
   private mcpServerTools = new Map<string, { toolNames: string[]; client: unknown; config?: McpServerConfig }>();
   private sessionDb: SessionDB | null;
@@ -123,6 +135,7 @@ export class Agent {
   private model: string;
   private contextWindow: number;
   private llmConfig: AgentConfig["llm"];
+  private fullConfig: AgentConfig & { skills?: SkillConfig };
 
   // Tool progress callbacks (registered by CLI/TG for display)
   // Legacy signature: (name, args) / (name, preview)
@@ -148,6 +161,9 @@ export class Agent {
   ) {
     this.transport = this.createTransport(config.llm);
     this.fallbackTransport = config.fallback ? this.createTransport(config.fallback) : null;
+    // Preserve the full parent config so sub-agents (review fork, etc.) can
+    // inherit runtime settings without re-resolving from env.
+    this.fullConfig = config;
     // Credential pool: multi-key failover (only if apiKeys array is provided)
     this.credentialPool = (config.llm.apiKeys && config.llm.apiKeys.length > 1)
       ? buildCredentialPool(config.llm)
@@ -180,6 +196,17 @@ export class Agent {
     this.toolOutputMaxLines = config.toolOutput?.maxLines ?? 2000;
     this.toolOutputMaxLineLength = config.toolOutput?.maxLineLength ?? 2000;
     this.fileReadMaxChars = config.fileRead?.maxChars ?? 100_000;
+
+    // Output budget for 3-layer context protection (Hermes tool_result_storage).
+    // Layer 1 is Agent.applyToolOutputLimits; Layer 2 + 3 below.
+    this.outputBudget = {
+      ...DEFAULT_OUTPUT_BUDGET,
+      defaultResultSize: this.toolOutputMaxBytes,
+      turnBudget: config.toolOutput?.turnBudgetBytes ?? DEFAULT_OUTPUT_BUDGET.turnBudget,
+      previewSize: config.toolOutput?.previewSize ?? DEFAULT_OUTPUT_BUDGET.previewSize,
+      maxLines: this.toolOutputMaxLines,
+      maxLineLength: this.toolOutputMaxLineLength,
+    };
     this.progressMode = "new";
     this.lastToolName = "";
     this.statusBarMode = "normal";
@@ -253,6 +280,13 @@ export class Agent {
     // intervalHours has elapsed since last run. State persisted to disk.
     const curator = new SkillCurator(this.skillRegistry);
     this.curatorScheduler = new CuratorScheduler(curator);
+
+    // Background self-improvement review — fires after main response delivery.
+    // Memory review every N user turns; skill review every N tool-call iterations.
+    // Summary (when actions fire) is forwarded via onBackgroundReview callback.
+    this.backgroundReview = new BackgroundReview({
+      onSummary: (msg) => this.onBackgroundReview?.(msg),
+    });
     // Register skill_manage tool so LLM can create/edit/delete skills
     const skillMgmt = skillManageTool(this.skillRegistry);
     (skillMgmt as { toolset?: string; emoji?: string }).toolset = "skills";
@@ -267,6 +301,18 @@ export class Agent {
     (skillRes as { toolset?: string; emoji?: string }).toolset = "skills";
     (skillRes as { emoji?: string }).emoji = "📎";
     this.toolRegistry.register(skillRes);
+
+    // Register vision_analyze tool — injects our auxClient so it uses the
+    // configured vision provider instead of constructing its own.
+    const { visionTool, setAuxClientForVision } = require("./tools/vision-tool.js") as typeof import("./tools/vision-tool.js");
+    setAuxClientForVision(this.auxiliaryClient);
+    this.toolRegistry.register(visionTool());
+
+    // Register execute_code (PTC) tool — lets the LLM compose multiple tool
+    // calls in a single Python script to avoid burning context per step.
+    const { codeExecutionTool } = require("./tools/code-execution.js") as typeof import("./tools/code-execution.js");
+    const execTool = codeExecutionTool({ registry: this.toolRegistry });
+    this.toolRegistry.register(execTool);
 
     // Register cron_manage tool if store provided
     if (cronStore) {
@@ -436,6 +482,7 @@ export class Agent {
 
   async run(userInput: string): Promise<string> {
     this.curatorScheduler.onUserActivity();
+    this.backgroundReview.onUserTurn();
     // Inactivity-based timeout: only kill if no tool/LLM activity for timeoutMs
     if (this.timeoutMs > 0) {
       this.lastActivityAt = Date.now();
@@ -518,9 +565,9 @@ export class Agent {
           }
           result = response.content ?? "";
         }
-        if (this.toolCallCount >= 5) {
-          this.suggestSkillCreation(resolvedInput, result);
-        }
+        // Background self-improvement review — spawns a review fork if
+        // memory/skill nudge interval elapsed. Fire-and-forget.
+        void this.triggerBackgroundReview([...this.messages]).catch(() => { /* */ });
         return result;
       }
     }
@@ -554,10 +601,9 @@ export class Agent {
     }
     if (!result) result = "[max turns reached]";
 
-    // Closed-loop learning: auto-suggest skill creation for complex tasks
-    if (this.toolCallCount >= 5) {
-      this.suggestSkillCreation(resolvedInput, result);
-    }
+    // Background self-improvement review (Hermes-style post-turn reflection).
+    // Fires on nudge interval; fully non-blocking.
+    void this.triggerBackgroundReview([...this.messages]).catch(() => { /* */ });
 
     // ── Goal Loop (Ralph Loop) — autonomous multi-turn continuation ──
     // If this session has an active goal, judge whether it's done.
@@ -652,6 +698,7 @@ export class Agent {
 
   async runStream(userInput: string, onToken: (token: string) => void): Promise<string> {
     this.curatorScheduler.onUserActivity();
+    this.backgroundReview.onUserTurn();
     // Pre-turn compression check (same as _run)
     if (this.compressor.shouldCompress(this.messages, this.contextWindow)) {
       console.log(`Auto-compressing ${this.messages.length} messages before stream turn`);
@@ -681,9 +728,8 @@ export class Agent {
     }
     if (!result) result = "[max turns reached]";
 
-    if (this.toolCallCount >= 5) {
-      this.suggestSkillCreation(userInput, result);
-    }
+    // Background self-improvement review (post-turn reflection).
+    void this.triggerBackgroundReview([...this.messages]).catch(() => { /* */ });
 
     // Idle-based curator tick (fire-and-forget; gated internally).
     void this.curatorScheduler.tick().catch(() => { /* non-critical */ });
@@ -729,6 +775,10 @@ export class Agent {
       // Classify tool calls for parallel execution
       const { parallel, serial } = this.classifyToolCalls(response.toolCalls);
 
+      // Collect this turn's tool messages so Layer 3 (turn budget) can spill
+      // aggregate oversize to disk before they hit the session transcript.
+      const thisTurnTools: TurnBudgetMessage[] = [];
+
       // Execute parallel-safe tools concurrently
       if (parallel.length > 0) {
         const results = await Promise.all(
@@ -736,9 +786,7 @@ export class Agent {
         );
         for (const { tc, resultStr } of results) {
           this.onToolResult?.(tc.name, resultStr);
-          const toolMsg: Message = { role: "tool", content: resultStr, toolCallId: tc.id };
-          this.messages.push(toolMsg);
-          if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, toolMsg, tc.name);
+          thisTurnTools.push({ toolName: tc.name, toolUseId: tc.id, content: resultStr });
         }
       }
 
@@ -746,9 +794,18 @@ export class Agent {
       for (const tc of serial) {
         const { resultStr } = await this.executeToolCall(tc);
         this.onToolResult?.(tc.name, resultStr);
-        const toolMsg: Message = { role: "tool", content: resultStr, toolCallId: tc.id };
+        thisTurnTools.push({ toolName: tc.name, toolUseId: tc.id, content: resultStr });
+      }
+
+      // Layer 3: enforce per-turn aggregate budget — spill largest
+      // non-persisted results to disk if we blew through the budget.
+      enforceTurnBudget(thisTurnTools, this.outputBudget);
+
+      // Persist (now-possibly-shrunk) tool messages into session/context.
+      for (const m of thisTurnTools) {
+        const toolMsg: Message = { role: "tool", content: m.content, toolCallId: m.toolUseId };
         this.messages.push(toolMsg);
-        if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, toolMsg, tc.name);
+        if (this.sessionDb) this.sessionDb.saveMessage(this.sessionId, toolMsg, m.toolName);
       }
 
       // Inject queued steer message (if any) as a user note the agent sees on next turn
@@ -846,6 +903,7 @@ export class Agent {
   private async executeToolCall(tc: ToolCall): Promise<{ tc: ToolCall; resultStr: string; duration: number; isError: boolean }> {
     const startTime = Date.now();
     this.toolCallCount++;
+    this.backgroundReview.onToolCall(tc.name);
     this.recordActivity();
     this.onToolCall?.(tc.name, tc.arguments);
 
@@ -912,6 +970,12 @@ export class Agent {
     resultStr = redactSensitiveText(resultStr, { force: true });
     // Apply tool output limits (Phase 4)
     resultStr = this.applyToolOutputLimits(tc.name, resultStr);
+
+    // Layer 2: per-result persistence — if still too large after Layer 1,
+    // write full content to disk and replace with preview + <persisted-output>
+    // ref. Agents can retrieve full output via read_file(path, offset, limit).
+    const persistRes = maybePersistResult(tc.name, tc.id, resultStr, this.outputBudget);
+    resultStr = persistRes.context;
 
     // Apply plugin tool-result transformers (can rewrite output)
     resultStr = await this.pluginSystem.applyToolResultTransformers(tc.name, tc.arguments, resultStr);
@@ -1034,14 +1098,53 @@ export class Agent {
     }
   }
 
-  /** Closed-loop learning: suggest creating a skill after complex tasks */
-  private suggestSkillCreation(userInput: string, result: string): void {
-    if (!this.memory) return;
-    this.memory.add(
-      `Complex task completed (${this.toolCallCount} tool calls). Consider using skill_manage create to save this workflow as a reusable skill. Task: ${userInput.slice(0, 100)}`,
-      "lesson",
-      "auto",
-    );
+  /** Spawn a short-lived review agent (Hermes _spawn_background_review pattern).
+   *  Inherits parent's provider/model but with a restricted toolset and focused prompt.
+   *  Fire-and-forget: errors are swallowed, the user never sees review internals. */
+  private async triggerBackgroundReview(messagesSnapshot: Message[]): Promise<void> {
+    const which = this.backgroundReview.checkAndReset();
+    if (!which.memory && !which.skill) return;
+
+    const spawner: ReviewAgentSpawner = {
+      spawn: async (args) => {
+        // Build a child config that shares the parent's LLM runtime but
+        // limits to the memory+skill toolset and disables nested review.
+        const childConfig: AgentConfig = {
+          ...this.fullConfig,
+          systemPrompt: args.prompt,
+          maxTurns: 8,
+          tools: args.tools,
+          skills: { ctf: false },
+        } as AgentConfig;
+
+        const child = new Agent(childConfig, this.memory ?? undefined, this.userProfile ?? undefined);
+        // Disable the child's own review fork to prevent recursion.
+        (child as unknown as { backgroundReview: BackgroundReview }).backgroundReview =
+          new BackgroundReview({ disabled: true });
+        child.loadMessages(messagesSnapshot);
+
+        const toolCalls: Array<{ name: string; result: string }> = [];
+        child.onToolCall = (name) => { toolCalls.push({ name, result: "" }); };
+        child.onToolResult = (name, preview) => {
+          // Pair the latest empty-result entry for this name
+          for (let i = toolCalls.length - 1; i >= 0; i--) {
+            if (toolCalls[i].name === name && !toolCalls[i].result) {
+              toolCalls[i].result = preview;
+              break;
+            }
+          }
+        };
+
+        try {
+          await child.run(args.prompt);
+        } finally {
+          try { await child.close({ closeMcp: false }); } catch { /* */ }
+        }
+        return { toolCalls };
+      },
+    };
+
+    await this.backgroundReview.run(spawner, messagesSnapshot, this.toolRegistry.list(), which);
   }
 
   private async callWithFallback(systemPrompt: string): Promise<NormalizedResponse> {

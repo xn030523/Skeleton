@@ -325,7 +325,7 @@ async function handleCdpAction(
   }
 }
 
-const CAMOFOX_DEFAULT = "http://localhost:9223";
+const CAMOFOX_DEFAULT = "http://localhost:9377";
 
 async function handleCamoFoxAction(
   action: string,
@@ -335,61 +335,8 @@ async function handleCamoFoxAction(
   js?: string,
   direction?: string,
 ): Promise<unknown> {
-  const base = process.env.SKELETON_CAMOFOX_URL ?? CAMOFOX_DEFAULT;
-  const sessionId = process.env.SKELETON_CAMOFOX_SESSION ?? "default";
-
-  async function cfPost(path: string, body?: Record<string, unknown>): Promise<unknown> {
-    const resp = await fetch(`${base}${path}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    return resp.json();
-  }
-
-  async function cfGet(path: string): Promise<unknown> {
-    const resp = await fetch(`${base}${path}`);
-    return resp.json();
-  }
-
-  const tabPath = `/sessions/${sessionId}/tabs/current`;
-
-  switch (action) {
-    case "navigate": {
-      if (!url) return { error: "Missing 'url' for navigate" };
-      return await cfPost(`${tabPath}/navigate`, { url });
-    }
-    case "snapshot": {
-      return await cfGet(`${tabPath}/snapshot`);
-    }
-    case "screenshot": {
-      const resp = await fetch(`${base}${tabPath}/screenshot`);
-      const buf = Buffer.from(await resp.arrayBuffer());
-      return { screenshot_base64: buf.toString("base64"), size_bytes: buf.length };
-    }
-    case "click": {
-      if (!selector) return { error: "Missing 'selector' for click" };
-      return await cfPost(`${tabPath}/click`, { ref: selector });
-    }
-    case "type": {
-      if (!selector || text === undefined) return { error: "Missing 'selector' or 'text' for type" };
-      return await cfPost(`${tabPath}/type`, { ref: selector, text });
-    }
-    case "scroll": {
-      return await cfPost(`${tabPath}/scroll`, { direction: direction ?? "down" });
-    }
-    case "back": {
-      return await cfPost(`${tabPath}/back`);
-    }
-    case "close": {
-      await fetch(`${base}/sessions/${sessionId}`, { method: "DELETE" });
-      return { success: true, message: "CamoFox session closed" };
-    }
-    case "evaluate": {
-      if (!js) return { error: "CamoFox does not support evaluate — use snapshot instead" };
-      return { error: "CamoFox does not support JS evaluation" };
-    }
-    default:
-      return { error: `Unknown action: ${action}. CamoFox supports: navigate, snapshot, screenshot, click, type, scroll, back, close` };
-  }
+  const { handleCamofoxAction } = require("./browser/camofox-backend.js") as typeof import("./browser/camofox-backend.js");
+  // Use a process-level task ID (single-session CLI mode).
+  const taskId = process.env.SKELETON_CAMOFOX_SESSION ?? "default";
+  return handleCamofoxAction(action, taskId, { url, selector, text, direction, key: selector });
 }

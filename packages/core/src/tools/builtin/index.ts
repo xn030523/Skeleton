@@ -10,6 +10,7 @@ import { webSearchTool } from "../web-tools.js";
 import { webFetchTool } from "./web-fetch.js";
 import { sandboxTerminalTool } from "../../sandbox.js";
 import { browserTool } from "../browser-tool.js";
+import { buildFileTools } from "../file-tools.js";
 
 export function builtInTools(): ToolDef[] {
   const tools: ToolDef[] = [
@@ -24,6 +25,7 @@ export function builtInTools(): ToolDef[] {
     webFetchTool(),
     sandboxTerminalTool(),
     browserTool(),
+    ...buildFileTools(),
   ];
 
   const toolsetMap: Record<string, string> = {

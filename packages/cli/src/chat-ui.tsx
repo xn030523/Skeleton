@@ -204,6 +204,9 @@ export function ChatUI({
     agent.onToolCall = () => {};
     agent.onToolComplete = buildToolCompleteHandler();
     agent.onToolResult = () => {};
+    agent.onBackgroundReview = (msg: string) => {
+      addLine(chalk.magenta(`  💾 ${msg}`));
+    };
 
     let firstToken = true;
     let accumulated = "";

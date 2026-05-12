@@ -11,6 +11,7 @@
 
 import type { Transport } from "./base.js";
 import type { LLMConfig, Message, NormalizedResponse, ToolCall, ToolDef } from "../types.js";
+import { sanitizeGeminiToolParameters } from "../providers/gemini-schema-sanitizer.js";
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -100,6 +101,8 @@ export class GeminiNativeTransport implements Transport {
           if (!candidate?.content?.parts) continue;
 
           for (const part of candidate.content.parts) {
+            // Skip thinking/reasoning parts (Gemini 2.5 thought tokens).
+            if ((part as { thought?: boolean }).thought === true) continue;
             if (part.text) {
               content += part.text;
               onToken(part.text);
@@ -149,7 +152,7 @@ export class GeminiNativeTransport implements Transport {
         functionDeclarations: tools.map(t => ({
           name: t.name,
           description: t.description,
-          parameters: t.parameters,
+          parameters: sanitizeGeminiToolParameters(t.parameters),
         })),
       }];
     }
@@ -159,6 +162,16 @@ export class GeminiNativeTransport implements Transport {
 
   private formatContents(messages: Message[]): GeminiContent[] {
     const contents: GeminiContent[] = [];
+    // Build a map from toolCallId → function name so tool results can reference
+    // the correct function name (Gemini requires name, not call_id).
+    const toolNameById = new Map<string, string>();
+    for (const m of messages) {
+      if (m.role === "assistant" && m.toolCalls) {
+        for (const tc of m.toolCalls) {
+          if (tc.id) toolNameById.set(tc.id, tc.name);
+        }
+      }
+    }
 
     for (const m of messages) {
       if (m.role === "system") continue;
@@ -176,11 +189,13 @@ export class GeminiNativeTransport implements Transport {
         if (parts.length === 0) parts.push({ text: "(empty)" });
         contents.push({ role: "model", parts });
       } else if (m.role === "tool") {
+        // Resolve function name: prefer toolCallId lookup, fall back to toolCallId itself.
+        const fnName = (m.toolCallId && toolNameById.get(m.toolCallId)) ?? m.toolCallId ?? "unknown";
         contents.push({
           role: "user",
           parts: [{
             functionResponse: {
-              name: m.toolCallId ?? "unknown",
+              name: fnName,
               response: { content: m.content },
             },
           }],
@@ -201,6 +216,8 @@ export class GeminiNativeTransport implements Transport {
     const toolCalls: ToolCall[] = [];
 
     for (const part of candidate.content.parts) {
+      // Skip thinking/reasoning parts (Gemini 2.5 thought tokens).
+      if ((part as { thought?: boolean }).thought === true) continue;
       if (part.text) content += part.text;
       if (part.functionCall) {
         toolCalls.push({

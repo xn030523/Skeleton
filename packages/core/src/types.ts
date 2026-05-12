@@ -52,6 +52,10 @@ export interface AgentConfig {
     maxLines?: number;
     /** 单行长度上限（字符，默认 2000） */
     maxLineLength?: number;
+    /** 单轮所有 tool 结果总字节预算，超出时最大的非持久化结果会溢出到磁盘（默认 200000） */
+    turnBudgetBytes?: number;
+    /** 持久化后返回给 LLM 的预览大小（字符，默认 1500） */
+    previewSize?: number;
   };
   /** 文件读取限制 (Phase 4) */
   fileRead?: {

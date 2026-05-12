@@ -6,3 +6,5 @@ export { SkillCurator } from "./curator.js";
 export type { CuratorReport } from "./curator.js";
 export { CuratorScheduler } from "./curator-scheduler.js";
 export type { CuratorState, CuratorSchedulerOptions } from "./curator-scheduler.js";
+export { BackgroundReview, MEMORY_REVIEW_PROMPT, SKILL_REVIEW_PROMPT, COMBINED_REVIEW_PROMPT, summarizeReviewActions } from "./background-review.js";
+export type { BackgroundReviewOptions, ReviewAgentSpawner } from "./background-review.js";
