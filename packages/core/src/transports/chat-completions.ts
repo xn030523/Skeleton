@@ -3,6 +3,7 @@ import type { Transport } from "./base.js";
 import type { LLMConfig, Message, NormalizedResponse, ToolCall, ToolDef } from "../types.js";
 import type { ProviderQuirks } from "../providers/registry.js";
 import { findProvider } from "../providers/registry.js";
+import { isMoonshotModel, sanitizeMoonshotToolParameters } from "../providers/moonshot-schema-sanitizer.js";
 
 export interface ChatCompletionsTransportOptions {
   quirks?: ProviderQuirks;
@@ -158,7 +159,10 @@ export class ChatCompletionsTransport implements Transport {
       function: {
         name: t.name,
         description: t.description,
-        parameters: t.parameters,
+        // Moonshot (Kimi) requires a stricter JSON Schema subset — sanitize.
+        parameters: isMoonshotModel(this.config.model)
+          ? sanitizeMoonshotToolParameters(t.parameters)
+          : t.parameters,
       },
     }));
   }
