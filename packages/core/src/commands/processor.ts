@@ -159,6 +159,9 @@ export async function processCommandAsync(
     case "goal":
       return cmdGoal(ctx, adapter, parts);
 
+    case "subgoal":
+      return cmdSubgoal(ctx, adapter, parts);
+
     case "stop":
       return cmdStop(ctx, adapter);
 
@@ -1213,6 +1216,82 @@ function cmdCron(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): 
   } else if (sub === "disable" && parts[2]) {
     ctx.cronStore.toggle(parts[2], false);
     adapter.addLine(chalk.green(`  ✓ Disabled: ${parts[2]}`));
+  }
+  return true;
+}
+
+function cmdSubgoal(ctx: CommandContext, adapter: OutputAdapter, parts: string[]): boolean {
+  const agent = ctx.agent as any;
+  const goalMgr = agent["goalManager"];
+  const sessionId = agent["sessionId"] ?? "default";
+
+  if (!goalMgr) {
+    adapter.addLine(chalk.red("  ✗ Goal manager not available"));
+    return true;
+  }
+
+  const sub = (parts[1] ?? "").toLowerCase();
+  const rest = parts.slice(2).join(" ").trim();
+
+  // Show checklist
+  if (!sub || sub === "status") {
+    const rendered = goalMgr.renderChecklist(sessionId);
+    adapter.addLines([chalk.cyan("  Subgoal checklist:"), ...rendered.split("\n").map((l: string) => `  ${l}`)]);
+    return true;
+  }
+
+  // Clear checklist
+  if (sub === "clear") {
+    goalMgr.clearChecklist(sessionId);
+    adapter.addLine(chalk.green("  ✓ Checklist cleared"));
+    return true;
+  }
+
+  // Mark actions
+  const statusMap: Record<string, "completed" | "impossible" | "pending"> = {
+    complete: "completed", done: "completed",
+    impossible: "impossible",
+    undo: "pending", revert: "pending",
+  };
+  if (statusMap[sub]) {
+    if (!rest) { adapter.addLine(chalk.gray(`  Usage: /subgoal ${sub} <n>`)); return true; }
+    const idx = parseInt(rest, 10);
+    if (isNaN(idx)) { adapter.addLine(chalk.red(`  /subgoal ${sub}: <n> must be an integer`)); return true; }
+    try {
+      const item = goalMgr.markSubgoal(sessionId, idx, statusMap[sub]);
+      adapter.addLine(chalk.green(`  ✓ Item ${idx} → ${item.status}: ${item.text}`));
+    } catch (err) {
+      adapter.addLine(chalk.red(`  ✗ /subgoal ${sub}: ${(err as Error).message}`));
+    }
+    return true;
+  }
+
+  // Remove
+  if (sub === "remove") {
+    if (!rest) { adapter.addLine(chalk.gray("  Usage: /subgoal remove <n>")); return true; }
+    const idx = parseInt(rest, 10);
+    if (isNaN(idx)) { adapter.addLine(chalk.red("  /subgoal remove: <n> must be an integer")); return true; }
+    try {
+      const removed = goalMgr.removeSubgoal(sessionId, idx);
+      adapter.addLine(chalk.green(`  ✓ Removed item ${idx}: ${removed.text}`));
+    } catch (err) {
+      adapter.addLine(chalk.red(`  ✗ /subgoal remove: ${(err as Error).message}`));
+    }
+    return true;
+  }
+
+  // Append new subgoal (everything after /subgoal is the text)
+  const text = parts.slice(1).join(" ").trim();
+  if (!text) {
+    adapter.addLine(chalk.gray("  Usage: /subgoal <text>  — add a checklist item"));
+    return true;
+  }
+  try {
+    const item = goalMgr.addSubgoal(sessionId, text);
+    const idx = (goalMgr.getGoal(sessionId)?.checklist?.length ?? 1);
+    adapter.addLine(chalk.green(`  ✓ Added subgoal ${idx}: ${item.text}`));
+  } catch (err) {
+    adapter.addLine(chalk.red(`  ✗ /subgoal: ${(err as Error).message}`));
   }
   return true;
 }

@@ -32,6 +32,15 @@ export const CONTINUATION_PROMPT_TEMPLATE = (
 
 export type GoalStatus = "active" | "paused" | "done" | "cleared";
 
+export type ChecklistItemStatus = "pending" | "completed" | "impossible";
+
+export interface ChecklistItem {
+  text: string;
+  status: ChecklistItemStatus;
+  addedBy: "agent" | "user";
+  createdAt: number;
+}
+
 export interface GoalState {
   goal: string;
   status: GoalStatus;
@@ -43,6 +52,7 @@ export interface GoalState {
   lastReason?: string;
   pausedReason?: string;
   consecutiveParseFailures: number;
+  checklist: ChecklistItem[];
 }
 
 export function createGoal(goal: string, maxTurns: number = DEFAULT_MAX_TURNS): GoalState {
@@ -54,6 +64,7 @@ export function createGoal(goal: string, maxTurns: number = DEFAULT_MAX_TURNS): 
     createdAt: Date.now(),
     lastTurnAt: 0,
     consecutiveParseFailures: 0,
+    checklist: [],
   };
 }
 
@@ -167,6 +178,69 @@ export class GoalManager {
   /** List all goals (for CLI display) */
   listGoals(): Array<{ sessionId: string; state: GoalState }> {
     return [...this.goals.entries()].map(([sessionId, state]) => ({ sessionId, state }));
+  }
+
+  // ── Subgoal (checklist) management — Hermes /subgoal pattern ────────
+
+  /** Append a user-authored checklist item. Requires an active or paused goal. */
+  addSubgoal(sessionId: string, text: string): ChecklistItem {
+    const state = this.goals.get(sessionId);
+    if (!state) throw new Error("no active goal");
+    const trimmed = text.trim();
+    if (!trimmed) throw new Error("subgoal text is empty");
+    const item: ChecklistItem = {
+      text: trimmed,
+      status: "pending",
+      addedBy: "user",
+      createdAt: Date.now(),
+    };
+    if (!state.checklist) state.checklist = [];
+    state.checklist.push(item);
+    this.persist(sessionId, state);
+    return item;
+  }
+
+  /** Override an item's status (1-based index). */
+  markSubgoal(sessionId: string, index1Based: number, status: ChecklistItemStatus): ChecklistItem {
+    const state = this.goals.get(sessionId);
+    if (!state) throw new Error("no active goal");
+    const checklist = state.checklist ?? [];
+    const idx = index1Based - 1;
+    if (idx < 0 || idx >= checklist.length) throw new RangeError(`index ${index1Based} out of range (1–${checklist.length})`);
+    checklist[idx].status = status;
+    this.persist(sessionId, state);
+    return checklist[idx];
+  }
+
+  /** Remove a checklist item (1-based index). */
+  removeSubgoal(sessionId: string, index1Based: number): ChecklistItem {
+    const state = this.goals.get(sessionId);
+    if (!state) throw new Error("no active goal");
+    const checklist = state.checklist ?? [];
+    const idx = index1Based - 1;
+    if (idx < 0 || idx >= checklist.length) throw new RangeError(`index ${index1Based} out of range (1–${checklist.length})`);
+    const [removed] = checklist.splice(idx, 1);
+    this.persist(sessionId, state);
+    return removed;
+  }
+
+  /** Wipe the checklist. */
+  clearChecklist(sessionId: string): void {
+    const state = this.goals.get(sessionId);
+    if (!state) return;
+    state.checklist = [];
+    this.persist(sessionId, state);
+  }
+
+  /** Render checklist as a human-readable string. */
+  renderChecklist(sessionId: string): string {
+    const state = this.goals.get(sessionId);
+    if (!state) return "(no active goal)";
+    const checklist = state.checklist ?? [];
+    if (checklist.length === 0) return "(no checklist items)";
+    const statusIcon = (s: ChecklistItemStatus) =>
+      s === "completed" ? "✅" : s === "impossible" ? "❌" : "⬜";
+    return checklist.map((item, i) => `  ${i + 1}. ${statusIcon(item.status)} ${item.text}`).join("\n");
   }
 
   // ── Persistence ─────────────────────────────────────────────

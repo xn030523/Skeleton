@@ -30,6 +30,8 @@ const DENIED_PREFIXES = [
   ".config/hermes",   // Hermes agent credentials
   ".local/share/keyrings",  // GNOME keyring
   "/etc/sudoers.d", "/etc/ssh", "/etc/pam.d",
+  "/etc/systemd",    // systemd service files
+  "/etc/cron.d", "/etc/cron.daily", "/etc/cron.weekly",
   // Skeleton-specific
   ".skeleton/credentials",
 ];

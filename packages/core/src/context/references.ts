@@ -10,13 +10,13 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 
 export interface ResolvedReference {
-  type: "file" | "url" | "git" | "diff";
+  type: "file" | "url" | "git" | "diff" | "folder";
   ref: string;
   content: string;
   error?: string;
 }
 
-const REFERENCE_RE = /@(file|url|git|diff):([^\s]+)/g;
+const REFERENCE_RE = /@(file|url|git|diff|folder):([^\s]+)/g;
 
 /**
  * Parse and resolve all context references in a user message.
@@ -66,6 +66,8 @@ async function resolveOne(
         return resolveGit(ref, cwd);
       case "diff":
         return resolveDiff(ref, cwd);
+      case "folder":
+        return resolveFolder(ref, cwd);
     }
   } catch (err) {
     return { type, ref, content: "", error: (err as Error).message };
@@ -135,4 +137,43 @@ function resolveDiff(ref: string, cwd: string): ResolvedReference {
   } catch (err) {
     return { type: "diff", ref, content: "", error: (err as Error).message };
   }
+}
+
+/** @folder: — list directory tree (Hermes context_references.py @folder: type) */
+function resolveFolder(ref: string, cwd: string): ResolvedReference {
+  const resolved = path.resolve(cwd, ref);
+  if (!resolved.startsWith(path.resolve(cwd)) && !resolved.startsWith(process.env.HOME ?? "/")) {
+    return { type: "folder", ref, content: "", error: "Path traversal blocked" };
+  }
+  if (!fs.existsSync(resolved)) {
+    return { type: "folder", ref, content: "", error: "Directory not found" };
+  }
+  const stat = fs.statSync(resolved);
+  if (!stat.isDirectory()) {
+    return { type: "folder", ref, content: "", error: "Not a directory — use @file: for files" };
+  }
+
+  const lines: string[] = [];
+  const MAX_ENTRIES = 200;
+
+  function walk(dir: string, prefix: string, depth: number): void {
+    if (depth > 4 || lines.length >= MAX_ENTRIES) return;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (lines.length >= MAX_ENTRIES) break;
+      if (e.name.startsWith(".") || e.name === "node_modules" || e.name === "__pycache__") continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        lines.push(`${prefix}${e.name}/`);
+        walk(full, prefix + "  ", depth + 1);
+      } else {
+        lines.push(`${prefix}${e.name}`);
+      }
+    }
+  }
+
+  walk(resolved, "", 0);
+  if (lines.length >= MAX_ENTRIES) lines.push(`... (truncated at ${MAX_ENTRIES} entries)`);
+  return { type: "folder", ref, content: lines.join("\n") };
 }

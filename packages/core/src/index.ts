@@ -44,7 +44,7 @@ export {
 } from "./mcp/index.js";
 export type { BuiltinMcpServer, McpCategory } from "./mcp/index.js";
 export { MCP_CATEGORIES } from "./mcp/index.js";
-export { buildMcpOAuth } from "./mcp/oauth.js";
+export { buildMcpOAuth, OAuthTokenManager, getMcpTokenManager } from "./mcp/oauth.js";
 export { checkPackageForMalware } from "./mcp/security.js";
 export { PersonalityStore } from "./personality/index.js";
 export {

@@ -167,3 +167,148 @@ async function exchangeCodeForTokens(
     refreshToken: data.refresh_token,
   };
 }
+
+// ── OAuthTokenManager — persistent token storage + auto-refresh ──────────
+// Port of Hermes HermesTokenStorage + OAuthClientProvider refresh logic.
+
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+
+const TOKEN_DIR = path.join(os.homedir(), ".skeleton", "mcp-tokens");
+
+function safeFilename(name: string): string {
+  return name.replace(/[^\w-]/g, "_").replace(/^_+|_+$/g, "").slice(0, 128) || "default";
+}
+
+interface StoredTokens {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;  // Unix ms
+  tokenEndpoint?: string;
+  clientId?: string;
+}
+
+export class OAuthTokenManager {
+  private serverName: string;
+  private tokenPath: string;
+  private tokens: StoredTokens | null = null;
+
+  constructor(serverName: string) {
+    this.serverName = serverName;
+    this.tokenPath = path.join(TOKEN_DIR, `${safeFilename(serverName)}.json`);
+    this.load();
+  }
+
+  private load(): void {
+    try {
+      if (fs.existsSync(this.tokenPath)) {
+        this.tokens = JSON.parse(fs.readFileSync(this.tokenPath, "utf-8"));
+      }
+    } catch { /* corrupt file — start fresh */ }
+  }
+
+  private save(): void {
+    try {
+      fs.mkdirSync(TOKEN_DIR, { recursive: true });
+      const tmp = this.tokenPath + `.tmp.${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(this.tokens, null, 2), { encoding: "utf-8", mode: 0o600 });
+      fs.renameSync(tmp, this.tokenPath);
+    } catch { /* non-critical */ }
+  }
+
+  /** Store tokens after initial OAuth flow or refresh. */
+  store(tokens: OAuthTokens & { expiresIn?: number; tokenEndpoint?: string; clientId?: string }): void {
+    this.tokens = {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      expiresAt: tokens.expiresIn ? Date.now() + tokens.expiresIn * 1000 : undefined,
+      tokenEndpoint: tokens.tokenEndpoint,
+      clientId: tokens.clientId,
+    };
+    this.save();
+  }
+
+  /** True when the stored access token is still valid (with 60s buffer). */
+  isValid(): boolean {
+    if (!this.tokens?.accessToken) return false;
+    if (!this.tokens.expiresAt) return true; // no expiry info — assume valid
+    return this.tokens.expiresAt - 60_000 > Date.now();
+  }
+
+  /** Return the current access token, refreshing if expired. Returns null if unavailable. */
+  async getAccessToken(): Promise<string | null> {
+    if (!this.tokens) return null;
+    if (this.isValid()) return this.tokens.accessToken;
+    // Try refresh
+    if (this.tokens.refreshToken && this.tokens.tokenEndpoint && this.tokens.clientId) {
+      const refreshed = await this.refresh(
+        this.tokens.tokenEndpoint,
+        this.tokens.clientId,
+        this.tokens.refreshToken,
+      );
+      if (refreshed) return refreshed;
+    }
+    return null;
+  }
+
+  /** Perform a refresh_token grant. Returns new access token or null on failure. */
+  async refresh(tokenEndpoint: string, clientId: string, refreshToken: string): Promise<string | null> {
+    try {
+      const resp = await fetch(tokenEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: clientId,
+          refresh_token: refreshToken,
+        }).toString(),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!resp.ok) {
+        console.warn(`[MCP OAuth] Token refresh failed for ${this.serverName}: HTTP ${resp.status}`);
+        return null;
+      }
+      const data = await resp.json() as {
+        access_token: string;
+        refresh_token?: string;
+        expires_in?: number;
+      };
+      this.tokens = {
+        ...this.tokens!,
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token ?? this.tokens!.refreshToken,
+        expiresAt: data.expires_in ? Date.now() + data.expires_in * 1000 : undefined,
+      };
+      this.save();
+      return data.access_token;
+    } catch (err) {
+      console.warn(`[MCP OAuth] Token refresh error for ${this.serverName}: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Build Authorization header value, refreshing if needed. */
+  async buildAuthHeader(): Promise<string | null> {
+    const token = await this.getAccessToken();
+    if (!token) return null;
+    return `Bearer ${token}`;
+  }
+
+  /** Clear stored tokens (e.g. on logout). */
+  clear(): void {
+    this.tokens = null;
+    try { fs.unlinkSync(this.tokenPath); } catch { /* */ }
+  }
+}
+
+/** Get or create a token manager for a named MCP server. */
+const _managers = new Map<string, OAuthTokenManager>();
+export function getMcpTokenManager(serverName: string): OAuthTokenManager {
+  let m = _managers.get(serverName);
+  if (!m) {
+    m = new OAuthTokenManager(serverName);
+    _managers.set(serverName, m);
+  }
+  return m;
+}

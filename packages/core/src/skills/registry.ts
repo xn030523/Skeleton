@@ -16,6 +16,8 @@ export interface SkillDef {
   category: string;
   userInvocable: boolean;
   agentCreated?: boolean;
+  /** Pinned skills bypass all auto-transitions and cannot be deleted by the agent. */
+  pinned?: boolean;
   /** OS platforms this skill supports (empty = all) */
   platforms?: string[];
   /** Absolute path to the skill directory on disk */
@@ -70,6 +72,8 @@ export class SkillRegistry {
   }
 
   unregister(name: string): boolean {
+    const skill = this.skills.get(name);
+    if (skill?.pinned) return false; // Pinned skills cannot be deleted
     const deleted = this.skills.delete(name);
     if (deleted) this.invalidateCache();
     return deleted;
@@ -280,8 +284,28 @@ export class SkillRegistry {
     return skillDir;
   }
 
+  /** Pin a skill — prevents deletion and auto-archiving. */
+  pin(name: string): boolean {
+    const skill = this.skills.get(name);
+    if (!skill) return false;
+    skill.pinned = true;
+    if (skill.agentCreated) this.saveToDisk(skill);
+    return true;
+  }
+
+  /** Unpin a skill. */
+  unpin(name: string): boolean {
+    const skill = this.skills.get(name);
+    if (!skill) return false;
+    skill.pinned = false;
+    if (skill.agentCreated) this.saveToDisk(skill);
+    return true;
+  }
+
   /** Delete skill directory from disk */
   deleteFromDisk(name: string): boolean {
+    const skill = this.skills.get(name);
+    if (skill?.pinned) return false; // Pinned skills cannot be deleted
     const skillName = name.replace(/[^a-z0-9_-]/gi, "_");
     const skillDir = path.join(this.userSkillDir, skillName);
     if (fs.existsSync(skillDir)) {

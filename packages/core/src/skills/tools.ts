@@ -125,10 +125,12 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
       "Manage skills — your procedural memory for recurring task types. " +
       "Actions: 'create' — create a new skill (SKILL.md + frontmatter); " +
       "'edit' — replace entire skill content; " +
-      "'patch' — update description/category/invocable; " +
+      "'patch' — update description/category/invocable OR do a fuzzy find-and-replace on SKILL.md content (pass old_string + new_string); " +
       "'delete' — remove a skill; " +
       "'rename' — rename a skill; " +
       "'list' — list all skills; " +
+      "'pin' — pin a skill (prevents deletion); " +
+      "'unpin' — unpin a skill; " +
       "'write_file' — add a supporting file (references/templates/scripts); " +
       "'remove_file' — delete a supporting file.",
     parameters: {
@@ -136,7 +138,7 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
       properties: {
         action: {
           type: "string",
-          enum: ["create", "edit", "patch", "delete", "rename", "list", "write_file", "remove_file"],
+          enum: ["create", "edit", "patch", "delete", "rename", "list", "pin", "unpin", "write_file", "remove_file"],
           description: "Action to perform.",
         },
         name: {
@@ -158,6 +160,18 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
         user_invocable: {
           type: "boolean",
           description: "Whether users can invoke this skill by name (for create/patch). Default: false.",
+        },
+        old_string: {
+          type: "string",
+          description: "Text to find in SKILL.md (for patch action — fuzzy find-and-replace). Use skill_view first to read current content.",
+        },
+        new_string: {
+          type: "string",
+          description: "Replacement text (for patch action — fuzzy find-and-replace).",
+        },
+        replace_all: {
+          type: "boolean",
+          description: "Replace all occurrences (for patch action). Default: false.",
         },
         file_name: {
           type: "string",
@@ -259,6 +273,26 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
           if (!existing) return `Error: skill '${name}' not found`;
           if (!existing.agentCreated) return `Error: cannot patch built-in skill '${name}'`;
 
+          // Content-level fuzzy patch (Hermes _patch_skill pattern)
+          if (args.old_string !== undefined && args.new_string !== undefined) {
+            const { fuzzyFindAndReplace } = require("../tools/fuzzy-match.js") as typeof import("../tools/fuzzy-match.js");
+            const currentContent = existing.content();
+            const res = fuzzyFindAndReplace(
+              currentContent,
+              String(args.old_string),
+              String(args.new_string),
+              Boolean(args.replace_all),
+            );
+            if (res.error) return `Error: patch failed — ${res.error}`;
+            if (res.matchCount === 0) return `Error: old_string not found in skill '${name}'. Use skill_view to read the current content first.`;
+
+            const updatedSkill = { ...existing, content: () => res.newContent };
+            registry.register(updatedSkill);
+            registry.saveToDisk(updatedSkill);
+            return `Skill '${name}' content patched (${res.matchCount} replacement(s), strategy=${res.strategy}).`;
+          }
+
+          // Metadata-only patch
           registry.update(name, {
             description: args.description ? String(args.description) : undefined,
             category: args.category ? String(args.category) : undefined,
@@ -275,10 +309,23 @@ export function skillManageTool(registry: SkillRegistry): ToolDef {
           const existing = registry.get(name);
           if (!existing) return `Error: skill '${name}' not found`;
           if (!existing.agentCreated) return `Error: cannot delete built-in skill '${name}'`;
+          if (existing.pinned) return `Error: skill '${name}' is pinned — use skill_manage(action='unpin') first`;
 
           registry.unregister(name);
           registry.deleteFromDisk(name);
           return `Skill '${name}' deleted.`;
+        }
+
+        case "pin": {
+          if (!name) return "Error: name is required";
+          const ok = registry.pin(name);
+          return ok ? `Skill '${name}' pinned — it will not be auto-archived or deleted.` : `Error: skill '${name}' not found`;
+        }
+
+        case "unpin": {
+          if (!name) return "Error: name is required";
+          const ok = registry.unpin(name);
+          return ok ? `Skill '${name}' unpinned.` : `Error: skill '${name}' not found`;
         }
 
         case "write_file": {

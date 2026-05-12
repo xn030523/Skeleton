@@ -30,6 +30,8 @@ export class ProjectContext {
   private filePath: string | null = null;
   private subdirectoryContexts = new Map<string, { content: string; mtime: number }>();
   private lastVisitedDir: string | null = null;
+  /** Pending hints to inject into the next tool result (cleared after getSubdirectoryHint). */
+  private pendingHints: string[] = [];
 
   constructor(private cwd: string = process.cwd()) {}
 
@@ -145,9 +147,26 @@ export class ProjectContext {
       }
 
       this.subdirectoryContexts.set(dir, { content, mtime: stat.mtimeMs });
+
+      // Queue as pending hint for injection into next tool result
+      // (Hermes SubdirectoryHintTracker: inject into tool result, not system prompt)
+      const relDir = path.relative(this.cwd, dir) || dir;
+      this.pendingHints.push(`[Subdirectory context discovered: ./${relDir}/]\n${content}`);
     } catch {
       // Ignore read errors
     }
+  }
+
+  /**
+   * Return pending subdirectory hints and clear the queue.
+   * Called by agent.ts after each tool execution to inject hints into the
+   * tool result (Hermes SubdirectoryHintTracker pattern — preserves prefix cache).
+   */
+  getSubdirectoryHint(): string | null {
+    if (this.pendingHints.length === 0) return null;
+    const hint = this.pendingHints.join("\n\n");
+    this.pendingHints = [];
+    return hint;
   }
 
   private discoverFile(): string | null {

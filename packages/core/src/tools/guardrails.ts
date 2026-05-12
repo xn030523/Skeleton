@@ -107,7 +107,12 @@ export class ToolCallGuardrail {
   }
 
   private makeKey(name: string, args: Record<string, unknown>): string {
-    return `${name}:${JSON.stringify(args)}`;
+    // Sort keys for stable canonical representation (Hermes canonical_tool_args pattern).
+    // JSON.stringify without sort produces different strings for {a:1,b:2} vs {b:2,a:1}.
+    const sortedArgs = Object.fromEntries(
+      Object.entries(args).sort(([a], [b]) => a.localeCompare(b)),
+    );
+    return `${name}:${JSON.stringify(sortedArgs)}`;
   }
 
   private addWarning(msg: string): void {

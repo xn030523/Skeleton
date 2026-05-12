@@ -35,6 +35,7 @@ import { PersonalityStore } from "./personality/index.js";
 import { mcpManageTool } from "./mcp/tools.js";
 import { toolsetManageTool } from "./tools/toolset.js";
 import { setOnToolListChanged } from "./tools/mcp.js";
+import { setMcpSamplingCallback } from "./tools/mcp.js";
 import { CredentialPool, buildCredentialPool } from "./credential-pool.js";
 import type { PooledCredential } from "./credential-pool.js";
 import { AuxiliaryClient, buildAuxiliaryClient } from "./auxiliary-client.js";
@@ -369,6 +370,23 @@ export class Agent {
       this.refreshMcpServerTools(serverName).catch(err => {
         console.error(`Failed to refresh MCP tools for "${serverName}": ${(err as Error).message}`);
       });
+    });
+
+    // MCP sampling: let MCP servers request LLM completions via sampling/createMessage.
+    // The callback routes through the agent's own transport so sampling uses the
+    // same model/credentials as the main session.
+    setMcpSamplingCallback(async (params) => {
+      const systemPrompt = params.systemPrompt ?? "You are a helpful assistant.";
+      const messages = params.messages.map(m => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+      try {
+        const resp = await this.transport.send(systemPrompt, messages as any, undefined);
+        return { role: "assistant", content: resp.content ?? "" };
+      } catch (err) {
+        return { role: "assistant", content: `Error: ${(err as Error).message}` };
+      }
     });
 
     // Post-write lint hook: auto-lint files after write_file/patch/edit
@@ -841,18 +859,30 @@ export class Agent {
   // ─── Tool parallelization ────────────────────────────────────────────────
 
   private static NEVER_PARALLEL = new Set([
-    "terminal", "browser", "write_file", "remove_file",
+    "clarify",  // interactive / user-facing — must be serial
+    "terminal", "browser",
     "skill_manage", "cron_manage", "mcp_manage", "delegate_task",
   ]);
 
   private static PARALLEL_SAFE = new Set([
+    // RE tools — read-only, no shared state
     "identify", "hexdump", "strings", "entropy", "pe_info", "elf_info",
-    "web_search", "web_fetch", "search_memory", "session_search",
-    "recent_sessions", "skill_view", "skill_resource",
+    "disassemble",
+    // Web — independent network requests
+    "web_search", "web_fetch",
+    // Memory / session — read-only queries
+    "search_memory", "session_search", "recent_sessions",
+    // Skill — read-only
+    "skill_view", "skill_resource",
+    // Vision — independent image analysis
+    "vision_analyze",
   ]);
 
-  /** PATH_SCOPED tools: parallel if paths don't overlap */
-  private static PATH_SCOPED_TOOLS = new Set(["read_file", "search_files"]);
+  /** PATH_SCOPED tools: parallel when paths don't overlap (Hermes _PATH_SCOPED_TOOLS) */
+  private static PATH_SCOPED_TOOLS = new Set([
+    "read_file", "search_files",
+    "write_file", "edit_file", "patch_file",  // safe when targeting different paths
+  ]);
 
   private classifyToolCalls(toolCalls: ToolCall[]): {
     parallel: ToolCall[];
@@ -874,13 +904,18 @@ export class Agent {
         continue;
       }
 
-      // Path-scoped tools: check for path overlap
+      // Path-scoped tools: check for path overlap (Hermes _paths_overlap: bidirectional prefix)
       if (Agent.PATH_SCOPED_TOOLS.has(tc.name)) {
-        const thisPath = String(tc.arguments.path ?? tc.arguments.file ?? tc.arguments.directory ?? "");
-        const overlap = parallel.some(
-          (p) => Agent.PATH_SCOPED_TOOLS.has(p.name) &&
-            String(p.arguments.path ?? p.arguments.file ?? p.arguments.directory ?? "").startsWith(thisPath),
-        );
+        const thisPath = String(tc.arguments.path ?? tc.arguments.file ?? tc.arguments.directory ?? "").replace(/\\/g, "/");
+        const overlap = parallel.some((p) => {
+          if (!Agent.PATH_SCOPED_TOOLS.has(p.name)) return false;
+          const otherPath = String(p.arguments.path ?? p.arguments.file ?? p.arguments.directory ?? "").replace(/\\/g, "/");
+          if (!thisPath || !otherPath) return true; // empty paths: assume overlap
+          const a = thisPath.split("/").filter(Boolean);
+          const b = otherPath.split("/").filter(Boolean);
+          const common = Math.min(a.length, b.length);
+          return a.slice(0, common).join("/") === b.slice(0, common).join("/");
+        });
         if (overlap) {
           serial.push(tc);
         } else {
@@ -907,9 +942,15 @@ export class Agent {
     this.recordActivity();
     this.onToolCall?.(tc.name, tc.arguments);
 
-    // Notify project context of directory visits (progressive subdirectory discovery)
-    if (tc.name === "terminal" && tc.arguments.cwd) {
-      this.projectContext.notifyDirectoryVisit(String(tc.arguments.cwd));
+    // Notify project context of directory visits (progressive subdirectory discovery).
+    // Hermes SubdirectoryHintTracker: auto-extract paths from ALL tool args,
+    // not just terminal.cwd — so read_file/search_files also trigger discovery.
+    const pathArgs = [
+      tc.arguments.path, tc.arguments.file_path, tc.arguments.directory,
+      tc.arguments.cwd, tc.arguments.workdir,
+    ].filter((v): v is string => typeof v === "string" && v.length > 0);
+    for (const p of pathArgs) {
+      this.projectContext.notifyDirectoryVisit(p);
     }
 
     // ── Hook: pre_tool_call (allows blocking or arg modification) ──
@@ -976,6 +1017,14 @@ export class Agent {
     // ref. Agents can retrieve full output via read_file(path, offset, limit).
     const persistRes = maybePersistResult(tc.name, tc.id, resultStr, this.outputBudget);
     resultStr = persistRes.context;
+
+    // Subdirectory hints: inject discovered AGENTS.md/.cursorrules content
+    // into the tool result (Hermes SubdirectoryHintTracker pattern).
+    // Injecting here (not system prompt) preserves prefix cache stability.
+    const subdirHint = this.projectContext.getSubdirectoryHint();
+    if (subdirHint) {
+      resultStr = resultStr + "\n\n" + subdirHint;
+    }
 
     // Apply plugin tool-result transformers (can rewrite output)
     resultStr = await this.pluginSystem.applyToolResultTransformers(tc.name, tc.arguments, resultStr);

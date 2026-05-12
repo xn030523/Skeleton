@@ -109,11 +109,71 @@ function stopKeepalive(): void {
 
 // ─── Core Connection ────────────────────────────────────────────────────────
 
+/** Optional sampling callback — lets MCP servers request LLM completions. */
+export type McpSamplingCallback = (params: {
+  messages: Array<{ role: string; content: string }>;
+  model?: string;
+  maxTokens?: number;
+  systemPrompt?: string;
+}) => Promise<{ role: string; content: string }>;
+
+let _samplingCallback: McpSamplingCallback | null = null;
+
+/** Register a sampling callback so MCP servers can request LLM completions. */
+export function setMcpSamplingCallback(cb: McpSamplingCallback | null): void {
+  _samplingCallback = cb;
+}
+
 export async function connectMcpServer(name: string, config: McpServerConfig): Promise<{ tools: ToolDef[]; client: Client }> {
+  // Declare sampling capability if a callback is registered
+  const samplingCapability = _samplingCallback ? { sampling: {} } : {};
+
   const client = new Client(
     { name: "skeleton", version: "0.1.0" },
-    { capabilities: { tools: {}, resources: {} } },
+    { capabilities: { ...samplingCapability } as any },
   );
+
+  // Register sampling/createMessage handler if callback available
+  if (_samplingCallback) {
+    const cb = _samplingCallback;
+    try {
+      client.setRequestHandler(
+        { method: "sampling/createMessage" } as any,
+        async (req: any) => {
+          const params = req.params ?? {};
+          const messages = (params.messages ?? []).map((m: any) => ({
+            role: String(m.role ?? "user"),
+            content: typeof m.content === "string"
+              ? m.content
+              : (m.content?.text ?? JSON.stringify(m.content ?? "")),
+          }));
+          try {
+            const result = await cb({
+              messages,
+              model: params.model ?? undefined,
+              maxTokens: params.maxTokens ?? 1024,
+              systemPrompt: params.systemPrompt ?? undefined,
+            });
+            return {
+              role: result.role,
+              content: { type: "text", text: result.content },
+              model: params.model ?? "skeleton",
+              stopReason: "endTurn",
+            };
+          } catch (err) {
+            return {
+              role: "assistant",
+              content: { type: "text", text: `Sampling error: ${(err as Error).message}` },
+              model: params.model ?? "skeleton",
+              stopReason: "error",
+            };
+          }
+        },
+      );
+    } catch {
+      // Older SDK versions may not support setRequestHandler — non-critical
+    }
+  }
 
   let transport;
   if (config.url) {

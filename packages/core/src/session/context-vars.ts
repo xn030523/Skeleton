@@ -1,15 +1,27 @@
 /**
- * Session Context Variables — session-scoped key-value store
- * that avoids race conditions in concurrent multi-session scenarios.
+ * Session Context Variables — session-scoped key-value store.
  *
- * Inspired by Hermes session_context.py (simplified — uses Map).
+ * Port of Hermes `gateway/session_context.py` (adapted for Node.js).
+ *
+ * Hermes uses Python `contextvars.ContextVar` for async task-local isolation.
+ * Node.js is single-threaded so we use a Map<sessionId, Map<key, value>>.
+ * The semantics are equivalent: each session gets its own isolated store.
+ *
+ * Resolution order (mirrors Hermes get_session_env):
+ *   1. Session store (set via setSessionEnv)
+ *   2. process.env fallback (CLI / cron compatibility)
+ *   3. default value
  */
 
 const SESSION_STORES = new Map<string, Map<string, string>>();
 
-/** Get a session-scoped environment variable */
-export function getSessionEnv(key: string, sessionId: string): string | undefined {
-  return SESSION_STORES.get(sessionId)?.get(key);
+/** Get a session-scoped environment variable.
+ *  Falls back to process.env then `defaultValue` (Hermes os.environ fallback). */
+export function getSessionEnv(key: string, sessionId: string, defaultValue = ""): string {
+  const stored = SESSION_STORES.get(sessionId)?.get(key);
+  if (stored !== undefined) return stored;
+  // Fallback to process.env for CLI / cron compatibility
+  return process.env[key] ?? defaultValue;
 }
 
 /** Set a session-scoped environment variable */
@@ -35,4 +47,19 @@ export function getSessionEnvAll(sessionId: string): Record<string, string> {
 /** Clean up all variables for a session */
 export function clearSessionEnv(sessionId: string): void {
   SESSION_STORES.delete(sessionId);
+}
+
+/** Set multiple session variables at once (mirrors Hermes set_session_vars). */
+export function setSessionVars(
+  sessionId: string,
+  vars: Record<string, string>,
+): void {
+  for (const [key, value] of Object.entries(vars)) {
+    setSessionEnv(key, value, sessionId);
+  }
+}
+
+/** Clear all session variables (mirrors Hermes clear_session_vars). */
+export function clearSessionVars(sessionId: string): void {
+  clearSessionEnv(sessionId);
 }

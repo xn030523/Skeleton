@@ -67,7 +67,7 @@ export class AnthropicTransport implements Transport {
         text: systemPrompt,
         cache_control: { type: "ephemeral" as const },
       }];
-      const messagesWithCache = this.applyCacheMarkers(formatted);
+      const messagesWithCache = this.applyCacheMarkers(formatted, this.getCacheTtl());
       requestParams.messages = messagesWithCache;
     } else {
       requestParams.system = systemPrompt;
@@ -103,7 +103,7 @@ export class AnthropicTransport implements Transport {
         text: systemPrompt,
         cache_control: { type: "ephemeral" as const },
       }];
-      const messagesWithCache = this.applyCacheMarkers(formatted);
+      const messagesWithCache = this.applyCacheMarkers(formatted, this.getCacheTtl());
       requestParams.messages = messagesWithCache;
     } else {
       requestParams.system = systemPrompt;
@@ -295,30 +295,56 @@ export class AnthropicTransport implements Transport {
     return result;
   }
 
-  /** Apply cache_control markers to the last 3 messages for prompt caching */
+  /** Apply cache_control markers using system_and_3 strategy (Hermes prompt_caching.py).
+   *
+   * Places up to 4 cache_control breakpoints:
+   *   1. System prompt (handled in send/sendStream via requestParams.system)
+   *   2-4. Last 3 non-system messages (rolling window)
+   *
+   * Supports cache_ttl: "5m" (default ephemeral) or "1h" (long-term cache).
+   * Tool messages get cache_control directly on the message object (native Anthropic format).
+   */
   private applyCacheMarkers(
     messages: Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }>,
+    cacheTtl: "5m" | "1h" = "5m",
   ): Array<{ role: "user" | "assistant"; content: string | Array<Record<string, unknown>> }> {
     if (messages.length === 0) return messages;
 
+    const marker: Record<string, unknown> = { type: "ephemeral" };
+    if (cacheTtl === "1h") marker.ttl = "1h";
+
+    // system_and_3: mark the last 3 non-system messages (system prompt is
+    // already marked in requestParams.system, consuming 1 of the 4 breakpoints)
+    const nonSysIndices = messages
+      .map((m, i) => ({ role: m.role, i }))
+      .filter(x => x.role !== "system")
+      .map(x => x.i);
+
+    const toMark = new Set(nonSysIndices.slice(-3));
+
     return messages.map((m, i) => {
-      const isLast3 = i >= messages.length - 3;
-      if (!isLast3) return m;
+      if (!toMark.has(i)) return m;
+
+      // Empty / null content: add cache_control directly on the message object
+      if (!m.content || m.content === "") {
+        return { ...m, cache_control: marker } as typeof m;
+      }
 
       if (typeof m.content === "string") {
         return {
           role: m.role,
           content: [
-            { type: "text", text: m.content, cache_control: { type: "ephemeral" as const } },
+            { type: "text", text: m.content, cache_control: marker },
           ],
         };
       }
 
+      // Array content: add cache_control to the last block
       const blocks = [...(m.content as Array<Record<string, unknown>>)];
       if (blocks.length > 0) {
         blocks[blocks.length - 1] = {
           ...blocks[blocks.length - 1],
-          cache_control: { type: "ephemeral" as const },
+          cache_control: marker,
         };
       }
       return { role: m.role, content: blocks };
@@ -377,6 +403,14 @@ export class AnthropicTransport implements Transport {
     if (!this.config.provider) return {};
     const profile = findProvider(this.config.provider);
     return profile?.quirks ?? {};
+  }
+
+  /** Resolve cache TTL: "1h" for long-term cache, "5m" (default) for ephemeral.
+   *  Set SKELETON_ANTHROPIC_CACHE_TTL=1h to enable long-term caching. */
+  private getCacheTtl(): "5m" | "1h" {
+    const env = process.env.SKELETON_ANTHROPIC_CACHE_TTL;
+    if (env === "1h") return "1h";
+    return "5m";
   }
 
   getConfig() { return this.config; }

@@ -1,6 +1,11 @@
 /**
  * Memory plugin interface — unified abstraction for mem0, supermemory, retaindb, etc.
  * Provides MemoryPlugin interface with Mem0Plugin (API) and InMemoryPlugin (local fallback).
+ *
+ * Extended with Hermes MemoryProvider lifecycle hooks:
+ *   - onPreCompress: extract insights before context compression discards messages
+ *   - onDelegation: observe sub-agent task+result pairs
+ *   - onSessionSwitch: handle /resume /branch /reset /new session changes
  */
 
 export interface MemoryPlugin {
@@ -9,6 +14,27 @@ export interface MemoryPlugin {
   retrieve(key: string): Promise<string | null>;
   search(query: string, limit?: number): Promise<Array<{ key: string; value: string; score: number }>>;
   delete(key: string): Promise<boolean>;
+
+  // ── Optional lifecycle hooks (Hermes MemoryProvider pattern) ──────────
+
+  /**
+   * Called before context compression discards old messages.
+   * Return text to include in the compression summary prompt so the
+   * compressor preserves provider-extracted insights.
+   */
+  onPreCompress?(messages: Array<{ role: string; content: string }>): string;
+
+  /**
+   * Called on the parent agent when a sub-agent completes.
+   * Use to mirror delegated task+result pairs to the memory backend.
+   */
+  onDelegation?(task: string, result: string, opts?: { childSessionId?: string }): void;
+
+  /**
+   * Called when the agent switches session_id mid-process (/resume /branch /reset /new).
+   * Use to flush per-session buffers and update session-scoped state.
+   */
+  onSessionSwitch?(newSessionId: string, opts?: { parentSessionId?: string; reset?: boolean }): void;
 }
 
 export class InMemoryPlugin implements MemoryPlugin {

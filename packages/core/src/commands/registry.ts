@@ -105,6 +105,13 @@ export const COMMAND_REGISTRY: CommandDef[] = [
     subcommands: ["status", "pause", "resume", "clear"],
   },
   {
+    name: "subgoal",
+    description: "Add or manage checklist items on the active goal",
+    category: "Session",
+    argsHint: "[text | complete N | impossible N | undo N | remove N | clear]",
+    subcommands: ["complete", "impossible", "undo", "remove", "clear"],
+  },
+  {
     name: "stop",
     description: "Kill all running background processes",
     category: "Session",
